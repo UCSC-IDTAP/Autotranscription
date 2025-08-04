@@ -136,6 +136,9 @@ dmypy.json
 transcriptions/
 output/
 
+# Pipeline workspace
+pipeline_workspace/
+
 # IDE
 .vscode/
 .idea/
