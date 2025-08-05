@@ -25,6 +25,13 @@ except ImportError:
     from audio_processing import AudioProcessor
     from raga_estimation import RagaEstimator
 
+# Import IDTAP Raga class
+try:
+    from idtap_api.classes.raga import Raga as IDTAPRaga
+except ImportError:
+    print("Warning: idtap-api not available. Raga object creation will be skipped.")
+    IDTAPRaga = None
+
 
 class AutoTranscriptionPipeline:
     """
@@ -75,6 +82,9 @@ class AutoTranscriptionPipeline:
         self.raga_estimator = RagaEstimator(models_dir=self.workspace_dir / "raga_models")
         self.visualizer = SargamVisualizer(self.visualizations_dir)
         self.audio_processor = AudioProcessor()
+        
+        # Store current Raga object (not persisted in JSON)
+        self.current_raga_object = None
     
     def get_audio_id_for_file(self, input_path: Path) -> int:
         """Get existing ID for a file or create a new one."""
@@ -188,6 +198,20 @@ class AutoTranscriptionPipeline:
             self.save_metadata(audio_id, metadata)
         else:
             raga_results = metadata["results"]["raga_estimation"]
+            # Recreate Raga object if it was previously created but not in memory
+            if (raga_results.get('raga_object_created', False) and 
+                IDTAPRaga is not None and 
+                self.current_raga_object is None):
+                try:
+                    predicted_raga_name = raga_results['predicted_raga']
+                    tonic_freq = metadata["results"]["tonic_estimation"]["original"]["tonic_frequency"]
+                    self.current_raga_object = IDTAPRaga({
+                        'name': predicted_raga_name,
+                        'fundamental': tonic_freq
+                    })
+                    print(f"🔄 Recreated IDTAP Raga object: {predicted_raga_name} (tonic: {tonic_freq:.1f} Hz)")
+                except Exception as e:
+                    print(f"⚠️  Failed to recreate IDTAP Raga object: {e}")
         
         pipeline_time = time.time() - pipeline_start
         metadata["last_run_time"] = pipeline_time
@@ -282,8 +306,39 @@ class AutoTranscriptionPipeline:
             raga_results = {
                 "error": "Raga estimation failed - insufficient pitch data or processing error"
             }
+        else:
+            # Create IDTAP Raga object if possible
+            if IDTAPRaga is not None:
+                try:
+                    predicted_raga_name = raga_results['predicted_raga']
+                    raga_obj = IDTAPRaga({
+                        'name': predicted_raga_name,
+                        'fundamental': tonic_freq
+                    })
+                    # Store the Raga object in the pipeline instance (not in JSON metadata)
+                    self.current_raga_object = raga_obj
+                    raga_results['raga_object_created'] = True
+                    print(f"✅ Created IDTAP Raga object: {predicted_raga_name} (tonic: {tonic_freq:.1f} Hz)")
+                    print(f"   Available sargam letters: {raga_obj.sargam_letters}")
+                    print(f"   Fundamental frequency: {raga_obj.fundamental:.1f} Hz")
+                except Exception as e:
+                    print(f"⚠️  Failed to create IDTAP Raga object: {e}")
+                    raga_results['raga_object_created'] = False
+                    self.current_raga_object = None
+            else:
+                raga_results['raga_object_created'] = False
+                self.current_raga_object = None
         
         return raga_results
+    
+    def get_current_raga_object(self):
+        """
+        Get the current IDTAP Raga object if available.
+        
+        Returns:
+            IDTAP Raga object or None if not available
+        """
+        return self.current_raga_object
     
     def list_audio_files(self) -> Dict[int, Dict[str, Any]]:
         """

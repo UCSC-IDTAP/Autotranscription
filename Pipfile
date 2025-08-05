@@ -4,7 +4,6 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-idtap-api = "*"
 demucs = "*"
 essentia = "*"
 matplotlib = "*"
@@ -16,6 +15,7 @@ soundfile = "*"
 pysptk = "*"
 pyworld = "*"
 scipy = "*"
+idtap-api = "*"
 
 [dev-packages]
 

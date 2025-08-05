@@ -46,6 +46,12 @@ This project follows a modular architecture prioritizing:
    - Amplitude envelope preservation for realistic audio outputs
    - Phase-continuous sine wave synthesis
 
+7. **RagaEstimator** (`src/autotranscription/raga_estimation.py`)
+   - TDMS (Time-Delayed Melody Surfaces) implementation for raga recognition
+   - Phase space embedding and delay coordinate generation
+   - Rule-based classification with confidence scoring for 15+ ragas
+   - Clean output format with candidate probabilities
+
 ### Pipeline Stages
 
 #### Stage 1: Audio Separation
@@ -63,6 +69,13 @@ This project follows a modular architecture prioritizing:
 - **Optional Algorithms**: CREPE, SWIPE, PyWorld
 - Parameters tuned for Indian classical music (55-1760 Hz range)
 - Confidence-based filtering with algorithm-specific thresholds
+
+#### Stage 4: Raga Estimation using TDMS
+- **Time-Delayed Melody Surfaces**: Phase space embedding of pitch sequences
+- **Delay Coordinates**: 3D vectors capturing melodic patterns and temporal relationships
+- **Tonic Normalization**: Pitch data converted to cents relative to estimated tonic
+- **Pattern Matching**: Rule-based classification against known raga characteristics
+- **Support for 15 ragas**: Yaman, Bhairav, Bhimpalasi, Malkauns, Bageshri, etc.
 
 ### Key Features
 
@@ -132,7 +145,8 @@ audio_files = pipeline.list_audio_files()
 
 ## Current State
 - ✅ **Modular Architecture**: Refactored into focused, maintainable modules
-- ✅ **Complete Pipeline**: Audio separation, tonic estimation, and pitch extraction
+- ✅ **Complete Pipeline**: Audio separation, tonic estimation, pitch extraction, and raga estimation
+- ✅ **TDMS Raga Recognition**: Time-Delayed Melody Surfaces for raga classification
 - ✅ **Sargam Visualization**: Indian classical music notation with clean y-axis
 - ✅ **Indian Classical Optimization**: Tuned for characteristics of this musical tradition
 - ✅ **Resumable Processing**: Metadata tracking with stage completion
