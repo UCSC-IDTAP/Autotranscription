@@ -8,7 +8,6 @@ idtap-api = "*"
 demucs = "*"
 essentia = "*"
 matplotlib = "*"
-scipy = "*"
 penn = "*"
 crepe = "*"
 librosa = "*"
@@ -16,6 +15,7 @@ tensorflow = "*"
 soundfile = "*"
 pysptk = "*"
 pyworld = "*"
+scipy = "*"
 
 [dev-packages]
 

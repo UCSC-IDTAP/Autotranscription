@@ -16,12 +16,14 @@ try:
     from .tonic_estimation import TonicEstimator
     from .visualization import SargamVisualizer
     from .audio_processing import AudioProcessor
+    from .raga_estimation import RagaEstimator
 except ImportError:
     from audio_separator import AudioSeparator
     from pitch_extraction import PitchExtractor
     from tonic_estimation import TonicEstimator
     from visualization import SargamVisualizer
     from audio_processing import AudioProcessor
+    from raga_estimation import RagaEstimator
 
 
 class AutoTranscriptionPipeline:
@@ -32,8 +34,9 @@ class AutoTranscriptionPipeline:
     1. Audio separation (vocals/instrumental)
     2. Tonic estimation
     3. Pitch trace extraction
-    4. Visualization generation
-    5. Audio output creation
+    4. Raga estimation using TDMS
+    5. Visualization generation
+    6. Audio output creation
     """
     
     def __init__(self, audio_separator_model: str = "htdemucs", workspace_dir: Union[str, Path] = None, 
@@ -69,6 +72,7 @@ class AutoTranscriptionPipeline:
         self.audio_separator = AudioSeparator(model_name=audio_separator_model)
         self.pitch_extractor = PitchExtractor(algorithms=algorithms)
         self.tonic_estimator = TonicEstimator()
+        self.raga_estimator = RagaEstimator(models_dir=self.workspace_dir / "raga_models")
         self.visualizer = SargamVisualizer(self.visualizations_dir)
         self.audio_processor = AudioProcessor()
     
@@ -176,6 +180,15 @@ class AutoTranscriptionPipeline:
         else:
             pitch_results = metadata["results"]["pitch_trace"]
         
+        # Stage 4: Raga Estimation
+        if "raga_estimation" not in metadata["stages_completed"]:
+            raga_results = self._run_raga_estimation(audio_id, metadata)
+            metadata["results"]["raga_estimation"] = raga_results
+            metadata["stages_completed"].append("raga_estimation")
+            self.save_metadata(audio_id, metadata)
+        else:
+            raga_results = metadata["results"]["raga_estimation"]
+        
         pipeline_time = time.time() - pipeline_start
         metadata["last_run_time"] = pipeline_time
         self.save_metadata(audio_id, metadata)
@@ -226,6 +239,51 @@ class AutoTranscriptionPipeline:
         )
         
         return pitch_results
+    
+    def _run_raga_estimation(self, audio_id: int, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Run raga estimation stage using RagaEstimator with TDMS."""
+        tonic_freq = metadata["results"]["tonic_estimation"]["original"]["tonic_frequency"]
+        pitch_results = metadata["results"]["pitch_trace"]
+        
+        # Try to estimate raga from the best available pitch extraction algorithm
+        # Prefer Essentia, but use any available algorithm
+        algorithm_priority = ['vocals_essentia', 'vocals_crepe', 'vocals_pyworld', 'vocals_swipe']
+        
+        raga_results = {}
+        for algorithm_key in algorithm_priority:
+            if algorithm_key in pitch_results:
+                try:
+                    # Get pitch data files
+                    pitch_file = pitch_results[algorithm_key]['pitch_data_file']
+                    confidence_file = pitch_results[algorithm_key]['confidence_data_file']
+                    times_file = pitch_results[algorithm_key]['times_data_file']
+                    
+                    # Get algorithm-specific confidence threshold
+                    confidence_thresholds = self.pitch_extractor.get_confidence_thresholds()
+                    confidence_threshold = confidence_thresholds.get(algorithm_key, 0.1)
+                    
+                    # Estimate raga using TDMS
+                    raga_result = self.raga_estimator.estimate_raga_from_pitch_data(
+                        pitch_file, confidence_file, times_file, 
+                        tonic_freq, confidence_threshold
+                    )
+                    
+                    # If we got a valid result, store it and break
+                    if raga_result and 'predicted_raga' in raga_result:
+                        raga_results = raga_result  # Use the result directly
+                        break
+                        
+                except Exception as e:
+                    # Continue to next algorithm if this one fails
+                    continue
+        
+        # If no successful results, return error
+        if not raga_results or 'predicted_raga' not in raga_results:
+            raga_results = {
+                "error": "Raga estimation failed - insufficient pitch data or processing error"
+            }
+        
+        return raga_results
     
     def list_audio_files(self) -> Dict[int, Dict[str, Any]]:
         """

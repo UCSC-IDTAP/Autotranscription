@@ -3,19 +3,48 @@
 ## Project Overview
 This project implements an automatic transcription pipeline specifically designed for Indian classical music. The pipeline processes audio files through multiple stages to extract pitch information and generate visual/audio representations of the melodic content.
 
+## Development Philosophy
+This project follows a modular architecture prioritizing:
+- **Separation of Concerns**: Each module handles a single responsibility
+- **Maintainability**: Easy to find, understand, and modify specific functionality
+- **Readability**: Clear, focused modules with reasonable file sizes
+- **Testability**: Components can be tested and developed in isolation
+- **Reusability**: Modules can be imported and used independently
+
 ## Architecture
 
-### Core Components
+### Modular Components
 
-1. **AudioSeparator** (`src/autotranscription/audio_separator.py`)
+1. **AutoTranscriptionPipeline** (`src/autotranscription/pipeline.py`)
+   - Main orchestrator for the entire transcription process (259 lines)
+   - Manages workspace organization and file tracking
+   - Implements resumable pipeline with stage completion tracking
+   - Coordinates all specialized modules
+
+2. **AudioSeparator** (`src/autotranscription/audio_separator.py`)
    - Uses Demucs models (htdemucs, htdemucs_ft) for vocal/instrumental separation
    - Separates input audio into vocals and instrumental tracks
    - Creates organized output structure with timing information
 
-2. **AutoTranscriptionPipeline** (`src/autotranscription/pipeline.py`)
-   - Main orchestrator for the entire transcription process
-   - Manages workspace organization and file tracking
-   - Implements resumable pipeline with stage completion tracking
+3. **PitchExtractor** (`src/autotranscription/pitch_extraction.py`)
+   - Multi-algorithm pitch estimation (Essentia, CREPE, SWIPE, PyWorld)
+   - Algorithm-specific confidence thresholds and optimization
+   - Handles data persistence and statistical analysis
+
+4. **TonicEstimator** (`src/autotranscription/tonic_estimation.py`)
+   - Tonic frequency estimation using Essentia's TonicIndianArtMusic
+   - Comparison between original and instrumental tracks
+   - Western note name conversion utilities
+
+5. **SargamVisualizer** (`src/autotranscription/visualization.py`)
+   - Matplotlib visualizations with Indian classical music notation
+   - Sargam pitch labels (S r R g G m M P d D n N) relative to tonic
+   - Logarithmic frequency scaling with octave diacritical marks
+
+6. **AudioProcessor** (`src/autotranscription/audio_processing.py`)
+   - Audio utilities for envelope extraction and sine wave generation
+   - Amplitude envelope preservation for realistic audio outputs
+   - Phase-continuous sine wave synthesis
 
 ### Pipeline Stages
 
@@ -61,10 +90,13 @@ pipeline_workspace/
 - **Frequency Range**: 55-1760 Hz (appropriate for Indian classical vocals)
 
 #### Visualization & Audio Output
-- Comparative pitch trace plots with logarithmic frequency scale
-- Individual algorithm plots showing confidence-filtered results
-- Sine wave reconstructions with original amplitude envelope applied
-- Disconnected segments for low-confidence regions (no interpolation)
+- **Sargam Visualization**: Single-axis plots with Indian classical music notation
+  - Y-axis shows sargam labels (S r R g G m M P d D n N) relative to detected tonic
+  - Range: 1 octave below to 2 octaves above tonic (48 chromatic divisions)
+  - Octave notation with diacritical marks: dots above (upper), dots below (lower)
+  - Clean y-axis without scientific notation, only musical labels
+- **Audio Outputs**: Sine wave reconstructions with original amplitude envelope applied
+- **Disconnected Segments**: Low-confidence regions create gaps (no interpolation)
 
 ## Usage Patterns
 
@@ -99,12 +131,14 @@ audio_files = pipeline.list_audio_files()
 - **Environment**: pipenv for dependency management
 
 ## Current State
-- ✅ Complete pipeline with audio separation, tonic estimation, and pitch extraction
-- ✅ Optimized for Indian classical music characteristics
-- ✅ Resumable processing with metadata tracking
-- ✅ Multiple pitch estimation algorithms with confidence filtering
-- ✅ Visualization and audio output generation
-- ✅ Workspace organization and file management
+- ✅ **Modular Architecture**: Refactored into focused, maintainable modules
+- ✅ **Complete Pipeline**: Audio separation, tonic estimation, and pitch extraction
+- ✅ **Sargam Visualization**: Indian classical music notation with clean y-axis
+- ✅ **Indian Classical Optimization**: Tuned for characteristics of this musical tradition
+- ✅ **Resumable Processing**: Metadata tracking with stage completion
+- ✅ **Multi-Algorithm Support**: Essentia, CREPE, SWIPE, PyWorld with confidence filtering
+- ✅ **Professional Output**: High-quality visualizations and audio reconstructions
+- ✅ **Organized Workspace**: Structured file management and data persistence
 
 ## Testing
 - Uses 1-minute excerpt of "Kishori Amonkar - Babul Mora" for testing
@@ -112,11 +146,12 @@ audio_files = pipeline.list_audio_files()
 - Visualizations and sine wave reconstructions available for quality assessment
 
 ## Notes for Future Development
-- Default configuration uses only Essentia for efficiency
-- Other algorithms (CREPE, SWIPE, PyWorld) available for comparison
-- Confidence thresholds tuned for Indian classical music
-- Amplitude envelope preservation in sine wave generation
-- Logarithmic frequency visualization for musical analysis
+- **Modular Design**: Each component can be developed and tested independently
+- **Algorithm Selection**: Default uses Essentia for efficiency; others available for comparison
+- **Configuration**: Confidence thresholds and parameters tuned for Indian classical music
+- **Extensibility**: New algorithms or visualizations can be added to respective modules
+- **Code Quality**: Maintain separation of concerns and reasonable file sizes
+- **Documentation**: Each module is self-documenting with clear responsibilities
 
 ## Commands to Remember
 - **Test Pipeline**: `pipenv run python src/autotranscription/pipeline.py`
