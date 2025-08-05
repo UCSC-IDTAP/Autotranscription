@@ -29,17 +29,23 @@ class AutoTranscriptionPipeline:
     Complete pipeline for auto-transcription of Indian classical music.
     """
     
-    def __init__(self, audio_separator_model: str = "htdemucs", workspace_dir: Union[str, Path] = None):
+    def __init__(self, audio_separator_model: str = "htdemucs", workspace_dir: Union[str, Path] = None, 
+                 algorithms: Optional[list] = None):
         """
         Initialize the pipeline.
         
         Args:
             audio_separator_model: Demucs model to use for audio separation
             workspace_dir: Directory to store all pipeline files (optional)
+            algorithms: List of algorithms to run. Default: ['essentia'] 
+                       Available: ['essentia', 'swipe', 'pyworld', 'crepe']
         """
         self.audio_separator = AudioSeparator(model_name=audio_separator_model)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path.cwd() / "pipeline_workspace"
         self.workspace_dir.mkdir(exist_ok=True)
+        
+        # Default to Essentia only, but allow other algorithms as options
+        self.algorithms = algorithms if algorithms is not None else ['essentia']
         
         # Algorithm-specific confidence thresholds
         self.essentia_threshold = 0.05  # Lowered from 0.1 to capture more quiet sections
@@ -227,7 +233,7 @@ class AutoTranscriptionPipeline:
     
     def _run_pitch_trace_extraction(self, audio_id: int, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Extract pitch traces using Essentia's PredominantPitchMelodia algorithm.
+        Extract pitch traces using selected algorithms (default: Essentia only).
         """
         results = {}
         
@@ -235,133 +241,136 @@ class AutoTranscriptionPipeline:
         separation_results = metadata["results"]["audio_separation"]
         vocals_path = Path(separation_results["vocals"])
         
-        
-        # Extract pitch trace from vocals track using Essentia
-        essentia_start = time.time()
-        vocals_pitch_essentia, vocals_confidence_essentia, vocals_times_essentia = self._extract_pitch_trace_essentia(vocals_path)
-        essentia_vocals_time = time.time() - essentia_start
-        vocals_essentia_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia.npy"
-        vocals_essentia_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_confidence.npy"
-        vocals_essentia_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_times.npy"
-        np.save(vocals_essentia_data_file, vocals_pitch_essentia)
-        np.save(vocals_essentia_confidence_file, vocals_confidence_essentia)
-        np.save(vocals_essentia_times_file, vocals_times_essentia)
-        
-        # Calculate confidence statistics for Essentia
-        high_conf_frames = np.sum(vocals_confidence_essentia > self.essentia_threshold)
-        conf_percentage = (high_conf_frames / len(vocals_confidence_essentia)) * 100
-        
-        results['vocals_essentia'] = {
-            "file": str(vocals_path),
-            "algorithm": "essentia_predominant_pitch_melodia",
-            "pitch_data_file": str(vocals_essentia_data_file),
-            "confidence_data_file": str(vocals_essentia_confidence_file),
-            "times_data_file": str(vocals_essentia_times_file),
-            "duration": len(vocals_times_essentia),
-            "sample_rate": len(vocals_times_essentia) / vocals_times_essentia[-1] if len(vocals_times_essentia) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(vocals_confidence_essentia.min()),
-            "confidence_max": float(vocals_confidence_essentia.max()),
-            "confidence_mean": float(vocals_confidence_essentia.mean()),
-            "processing_time": essentia_vocals_time
-        }
-        
-        
-        # Extract pitch trace from vocals track using SWIPE
-        swipe_start = time.time()
-        vocals_pitch_swipe, vocals_confidence_swipe, vocals_times_swipe = self._extract_pitch_trace_swipe(vocals_path)
-        swipe_vocals_time = time.time() - swipe_start
-        vocals_swipe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe.npy"
-        vocals_swipe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_confidence.npy"
-        vocals_swipe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_times.npy"
-        np.save(vocals_swipe_data_file, vocals_pitch_swipe)
-        np.save(vocals_swipe_confidence_file, vocals_confidence_swipe)
-        np.save(vocals_swipe_times_file, vocals_times_swipe)
-        
-        # Calculate confidence statistics for SWIPE
-        high_conf_frames = np.sum(vocals_confidence_swipe > self.swipe_threshold)
-        conf_percentage = (high_conf_frames / len(vocals_confidence_swipe)) * 100
-        
-        results['vocals_swipe'] = {
-            "file": str(vocals_path),
-            "algorithm": "swipe",
-            "pitch_data_file": str(vocals_swipe_data_file),
-            "confidence_data_file": str(vocals_swipe_confidence_file),
-            "times_data_file": str(vocals_swipe_times_file),
-            "duration": len(vocals_times_swipe),
-            "sample_rate": len(vocals_times_swipe) / vocals_times_swipe[-1] if len(vocals_times_swipe) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(vocals_confidence_swipe.min()),
-            "confidence_max": float(vocals_confidence_swipe.max()),
-            "confidence_mean": float(vocals_confidence_swipe.mean()),
-            "processing_time": swipe_vocals_time
-        }
+        # Extract pitch trace from vocals track using Essentia (if selected)
+        if 'essentia' in self.algorithms:
+            essentia_start = time.time()
+            vocals_pitch_essentia, vocals_confidence_essentia, vocals_times_essentia = self._extract_pitch_trace_essentia(vocals_path)
+            essentia_vocals_time = time.time() - essentia_start
+            vocals_essentia_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia.npy"
+            vocals_essentia_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_confidence.npy"
+            vocals_essentia_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_times.npy"
+            np.save(vocals_essentia_data_file, vocals_pitch_essentia)
+            np.save(vocals_essentia_confidence_file, vocals_confidence_essentia)
+            np.save(vocals_essentia_times_file, vocals_times_essentia)
+            
+            # Calculate confidence statistics for Essentia
+            high_conf_frames = np.sum(vocals_confidence_essentia > self.essentia_threshold)
+            conf_percentage = (high_conf_frames / len(vocals_confidence_essentia)) * 100
+            
+            results['vocals_essentia'] = {
+                "file": str(vocals_path),
+                "algorithm": "essentia_predominant_pitch_melodia",
+                "pitch_data_file": str(vocals_essentia_data_file),
+                "confidence_data_file": str(vocals_essentia_confidence_file),
+                "times_data_file": str(vocals_essentia_times_file),
+                "duration": len(vocals_times_essentia),
+                "sample_rate": len(vocals_times_essentia) / vocals_times_essentia[-1] if len(vocals_times_essentia) > 0 else 0,
+                "high_confidence_frames": int(high_conf_frames),
+                "confidence_percentage": conf_percentage,
+                "confidence_min": float(vocals_confidence_essentia.min()),
+                "confidence_max": float(vocals_confidence_essentia.max()),
+                "confidence_mean": float(vocals_confidence_essentia.mean()),
+                "processing_time": essentia_vocals_time
+            }
         
         
-        # Extract pitch trace from vocals track using PyWorld
-        pyworld_start = time.time()
-        vocals_pitch_pyworld, vocals_confidence_pyworld, vocals_times_pyworld = self._extract_pitch_trace_pyworld(vocals_path)
-        pyworld_vocals_time = time.time() - pyworld_start
-        vocals_pyworld_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld.npy"
-        vocals_pyworld_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_confidence.npy"
-        vocals_pyworld_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_times.npy"
-        np.save(vocals_pyworld_data_file, vocals_pitch_pyworld)
-        np.save(vocals_pyworld_confidence_file, vocals_confidence_pyworld)
-        np.save(vocals_pyworld_times_file, vocals_times_pyworld)
+        # Extract pitch trace from vocals track using SWIPE (if selected)
+        if 'swipe' in self.algorithms:
+            swipe_start = time.time()
+            vocals_pitch_swipe, vocals_confidence_swipe, vocals_times_swipe = self._extract_pitch_trace_swipe(vocals_path)
+            swipe_vocals_time = time.time() - swipe_start
+            vocals_swipe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe.npy"
+            vocals_swipe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_confidence.npy"
+            vocals_swipe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_times.npy"
+            np.save(vocals_swipe_data_file, vocals_pitch_swipe)
+            np.save(vocals_swipe_confidence_file, vocals_confidence_swipe)
+            np.save(vocals_swipe_times_file, vocals_times_swipe)
+            
+            # Calculate confidence statistics for SWIPE
+            high_conf_frames = np.sum(vocals_confidence_swipe > self.swipe_threshold)
+            conf_percentage = (high_conf_frames / len(vocals_confidence_swipe)) * 100
+            
+            results['vocals_swipe'] = {
+                "file": str(vocals_path),
+                "algorithm": "swipe",
+                "pitch_data_file": str(vocals_swipe_data_file),
+                "confidence_data_file": str(vocals_swipe_confidence_file),
+                "times_data_file": str(vocals_swipe_times_file),
+                "duration": len(vocals_times_swipe),
+                "sample_rate": len(vocals_times_swipe) / vocals_times_swipe[-1] if len(vocals_times_swipe) > 0 else 0,
+                "high_confidence_frames": int(high_conf_frames),
+                "confidence_percentage": conf_percentage,
+                "confidence_min": float(vocals_confidence_swipe.min()),
+                "confidence_max": float(vocals_confidence_swipe.max()),
+                "confidence_mean": float(vocals_confidence_swipe.mean()),
+                "processing_time": swipe_vocals_time
+            }
         
-        # Calculate confidence statistics for PyWorld
-        high_conf_frames = np.sum(vocals_confidence_pyworld > self.pyworld_threshold)
-        conf_percentage = (high_conf_frames / len(vocals_confidence_pyworld)) * 100
         
-        results['vocals_pyworld'] = {
-            "file": str(vocals_path),
-            "algorithm": "pyworld",
-            "pitch_data_file": str(vocals_pyworld_data_file),
-            "confidence_data_file": str(vocals_pyworld_confidence_file),
-            "times_data_file": str(vocals_pyworld_times_file),
-            "duration": len(vocals_times_pyworld),
-            "sample_rate": len(vocals_times_pyworld) / vocals_times_pyworld[-1] if len(vocals_times_pyworld) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(vocals_confidence_pyworld.min()),
-            "confidence_max": float(vocals_confidence_pyworld.max()),
-            "confidence_mean": float(vocals_confidence_pyworld.mean()),
-            "processing_time": pyworld_vocals_time
-        }
+        # Extract pitch trace from vocals track using PyWorld (if selected)
+        if 'pyworld' in self.algorithms:
+            pyworld_start = time.time()
+            vocals_pitch_pyworld, vocals_confidence_pyworld, vocals_times_pyworld = self._extract_pitch_trace_pyworld(vocals_path)
+            pyworld_vocals_time = time.time() - pyworld_start
+            vocals_pyworld_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld.npy"
+            vocals_pyworld_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_confidence.npy"
+            vocals_pyworld_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_times.npy"
+            np.save(vocals_pyworld_data_file, vocals_pitch_pyworld)
+            np.save(vocals_pyworld_confidence_file, vocals_confidence_pyworld)
+            np.save(vocals_pyworld_times_file, vocals_times_pyworld)
+            
+            # Calculate confidence statistics for PyWorld
+            high_conf_frames = np.sum(vocals_confidence_pyworld > self.pyworld_threshold)
+            conf_percentage = (high_conf_frames / len(vocals_confidence_pyworld)) * 100
+            
+            results['vocals_pyworld'] = {
+                "file": str(vocals_path),
+                "algorithm": "pyworld",
+                "pitch_data_file": str(vocals_pyworld_data_file),
+                "confidence_data_file": str(vocals_pyworld_confidence_file),
+                "times_data_file": str(vocals_pyworld_times_file),
+                "duration": len(vocals_times_pyworld),
+                "sample_rate": len(vocals_times_pyworld) / vocals_times_pyworld[-1] if len(vocals_times_pyworld) > 0 else 0,
+                "high_confidence_frames": int(high_conf_frames),
+                "confidence_percentage": conf_percentage,
+                "confidence_min": float(vocals_confidence_pyworld.min()),
+                "confidence_max": float(vocals_confidence_pyworld.max()),
+                "confidence_mean": float(vocals_confidence_pyworld.mean()),
+                "processing_time": pyworld_vocals_time
+            }
         
         
-        # Extract pitch trace from vocals track using CREPE
-        crepe_start = time.time()
-        vocals_pitch_crepe, vocals_confidence_crepe, vocals_times_crepe = self._extract_pitch_trace_crepe(vocals_path)
-        crepe_vocals_time = time.time() - crepe_start
-        vocals_crepe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe.npy"
-        vocals_crepe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_confidence.npy"
-        vocals_crepe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_times.npy"
-        np.save(vocals_crepe_data_file, vocals_pitch_crepe)
-        np.save(vocals_crepe_confidence_file, vocals_confidence_crepe)
-        np.save(vocals_crepe_times_file, vocals_times_crepe)
-        
-        # Calculate confidence statistics for CREPE
-        high_conf_frames = np.sum(vocals_confidence_crepe > self.crepe_threshold)
-        conf_percentage = (high_conf_frames / len(vocals_confidence_crepe)) * 100
-        
-        results['vocals_crepe'] = {
-            "file": str(vocals_path),
-            "algorithm": "crepe",
-            "pitch_data_file": str(vocals_crepe_data_file),
-            "confidence_data_file": str(vocals_crepe_confidence_file),
-            "times_data_file": str(vocals_crepe_times_file),
-            "duration": len(vocals_times_crepe),
-            "sample_rate": len(vocals_times_crepe) / vocals_times_crepe[-1] if len(vocals_times_crepe) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(vocals_confidence_crepe.min()),
-            "confidence_max": float(vocals_confidence_crepe.max()),
-            "confidence_mean": float(vocals_confidence_crepe.mean()),
-            "processing_time": crepe_vocals_time
-        }
+        # Extract pitch trace from vocals track using CREPE (if selected)
+        if 'crepe' in self.algorithms:
+            crepe_start = time.time()
+            vocals_pitch_crepe, vocals_confidence_crepe, vocals_times_crepe = self._extract_pitch_trace_crepe(vocals_path)
+            crepe_vocals_time = time.time() - crepe_start
+            vocals_crepe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe.npy"
+            vocals_crepe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_confidence.npy"
+            vocals_crepe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_times.npy"
+            np.save(vocals_crepe_data_file, vocals_pitch_crepe)
+            np.save(vocals_crepe_confidence_file, vocals_confidence_crepe)
+            np.save(vocals_crepe_times_file, vocals_times_crepe)
+            
+            # Calculate confidence statistics for CREPE
+            high_conf_frames = np.sum(vocals_confidence_crepe > self.crepe_threshold)
+            conf_percentage = (high_conf_frames / len(vocals_confidence_crepe)) * 100
+            
+            results['vocals_crepe'] = {
+                "file": str(vocals_path),
+                "algorithm": "crepe",
+                "pitch_data_file": str(vocals_crepe_data_file),
+                "confidence_data_file": str(vocals_crepe_confidence_file),
+                "times_data_file": str(vocals_crepe_times_file),
+                "duration": len(vocals_times_crepe),
+                "sample_rate": len(vocals_times_crepe) / vocals_times_crepe[-1] if len(vocals_times_crepe) > 0 else 0,
+                "high_confidence_frames": int(high_conf_frames),
+                "confidence_percentage": conf_percentage,
+                "confidence_min": float(vocals_confidence_crepe.min()),
+                "confidence_max": float(vocals_confidence_crepe.max()),
+                "confidence_mean": float(vocals_confidence_crepe.mean()),
+                "processing_time": crepe_vocals_time
+            }
         
         # Create visualizations
         self._create_pitch_visualizations(audio_id, metadata, results)
