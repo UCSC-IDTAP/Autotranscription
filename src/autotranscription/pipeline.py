@@ -12,8 +12,11 @@ from typing import Union, Dict, Any, Optional, Tuple
 import essentia.standard as es
 import scipy.io.wavfile as wavfile
 from scipy import signal
-import penn
-import torch
+import crepe
+import librosa
+import soundfile as sf
+import pysptk
+import pyworld
 
 try:
     from .audio_separator import AudioSeparator
@@ -37,6 +40,12 @@ class AutoTranscriptionPipeline:
         self.audio_separator = AudioSeparator(model_name=audio_separator_model)
         self.workspace_dir = Path(workspace_dir) if workspace_dir else Path.cwd() / "pipeline_workspace"
         self.workspace_dir.mkdir(exist_ok=True)
+        
+        # Algorithm-specific confidence thresholds
+        self.essentia_threshold = 0.05  # Lowered from 0.1 to capture more quiet sections
+        self.crepe_threshold = 0.7
+        self.swipe_threshold = 0.5  # SWIPE uses 0-1 scale, no explicit confidence but threshold on pitch
+        self.pyworld_threshold = 0.5  # PyWorld threshold on pitch values
         
         # Create subdirectories
         self.audio_dir = self.workspace_dir / "audio"
@@ -226,36 +235,11 @@ class AutoTranscriptionPipeline:
         separation_results = metadata["results"]["audio_separation"]
         vocals_path = Path(separation_results["vocals"])
         
-        # Extract pitch trace from original track using Essentia
-        original_pitch_essentia, original_confidence_essentia, original_times_essentia = self._extract_pitch_trace_essentia(original_path)
-        original_essentia_data_file = self.pitch_traces_dir / f"{audio_id}_original_essentia.npy"
-        original_essentia_confidence_file = self.pitch_traces_dir / f"{audio_id}_original_essentia_confidence.npy"
-        original_essentia_times_file = self.pitch_traces_dir / f"{audio_id}_original_essentia_times.npy"
-        np.save(original_essentia_data_file, original_pitch_essentia)
-        np.save(original_essentia_confidence_file, original_confidence_essentia)
-        np.save(original_essentia_times_file, original_times_essentia)
-        
-        # Calculate confidence statistics for Essentia
-        high_conf_frames = np.sum(original_confidence_essentia > 0.1)
-        conf_percentage = (high_conf_frames / len(original_confidence_essentia)) * 100
-        
-        results['original_essentia'] = {
-            "file": str(original_path),
-            "algorithm": "essentia_predominant_pitch_melodia",
-            "pitch_data_file": str(original_essentia_data_file),
-            "confidence_data_file": str(original_essentia_confidence_file),
-            "times_data_file": str(original_essentia_times_file),
-            "duration": len(original_times_essentia),
-            "sample_rate": len(original_times_essentia) / original_times_essentia[-1] if len(original_times_essentia) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(original_confidence_essentia.min()),
-            "confidence_max": float(original_confidence_essentia.max()),
-            "confidence_mean": float(original_confidence_essentia.mean())
-        }
         
         # Extract pitch trace from vocals track using Essentia
+        essentia_start = time.time()
         vocals_pitch_essentia, vocals_confidence_essentia, vocals_times_essentia = self._extract_pitch_trace_essentia(vocals_path)
+        essentia_vocals_time = time.time() - essentia_start
         vocals_essentia_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia.npy"
         vocals_essentia_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_confidence.npy"
         vocals_essentia_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_essentia_times.npy"
@@ -264,7 +248,7 @@ class AutoTranscriptionPipeline:
         np.save(vocals_essentia_times_file, vocals_times_essentia)
         
         # Calculate confidence statistics for Essentia
-        high_conf_frames = np.sum(vocals_confidence_essentia > 0.1)
+        high_conf_frames = np.sum(vocals_confidence_essentia > self.essentia_threshold)
         conf_percentage = (high_conf_frames / len(vocals_confidence_essentia)) * 100
         
         results['vocals_essentia'] = {
@@ -279,63 +263,104 @@ class AutoTranscriptionPipeline:
             "confidence_percentage": conf_percentage,
             "confidence_min": float(vocals_confidence_essentia.min()),
             "confidence_max": float(vocals_confidence_essentia.max()),
-            "confidence_mean": float(vocals_confidence_essentia.mean())
+            "confidence_mean": float(vocals_confidence_essentia.mean()),
+            "processing_time": essentia_vocals_time
         }
         
-        # Extract pitch trace from original track using PENN
-        original_pitch_penn, original_confidence_penn, original_times_penn = self._extract_pitch_trace_penn(original_path)
-        original_penn_data_file = self.pitch_traces_dir / f"{audio_id}_original_penn.npy"
-        original_penn_confidence_file = self.pitch_traces_dir / f"{audio_id}_original_penn_confidence.npy"
-        original_penn_times_file = self.pitch_traces_dir / f"{audio_id}_original_penn_times.npy"
-        np.save(original_penn_data_file, original_pitch_penn)
-        np.save(original_penn_confidence_file, original_confidence_penn)
-        np.save(original_penn_times_file, original_times_penn)
         
-        # Calculate confidence statistics for PENN
-        high_conf_frames = np.sum(original_confidence_penn > 0.1)
-        conf_percentage = (high_conf_frames / len(original_confidence_penn)) * 100
+        # Extract pitch trace from vocals track using SWIPE
+        swipe_start = time.time()
+        vocals_pitch_swipe, vocals_confidence_swipe, vocals_times_swipe = self._extract_pitch_trace_swipe(vocals_path)
+        swipe_vocals_time = time.time() - swipe_start
+        vocals_swipe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe.npy"
+        vocals_swipe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_confidence.npy"
+        vocals_swipe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_swipe_times.npy"
+        np.save(vocals_swipe_data_file, vocals_pitch_swipe)
+        np.save(vocals_swipe_confidence_file, vocals_confidence_swipe)
+        np.save(vocals_swipe_times_file, vocals_times_swipe)
         
-        results['original_penn'] = {
-            "file": str(original_path),
-            "algorithm": "penn",
-            "pitch_data_file": str(original_penn_data_file),
-            "confidence_data_file": str(original_penn_confidence_file),
-            "times_data_file": str(original_penn_times_file),
-            "duration": len(original_times_penn),
-            "sample_rate": len(original_times_penn) / original_times_penn[-1] if len(original_times_penn) > 0 else 0,
-            "high_confidence_frames": int(high_conf_frames),
-            "confidence_percentage": conf_percentage,
-            "confidence_min": float(original_confidence_penn.min()),
-            "confidence_max": float(original_confidence_penn.max()),
-            "confidence_mean": float(original_confidence_penn.mean())
-        }
+        # Calculate confidence statistics for SWIPE
+        high_conf_frames = np.sum(vocals_confidence_swipe > self.swipe_threshold)
+        conf_percentage = (high_conf_frames / len(vocals_confidence_swipe)) * 100
         
-        # Extract pitch trace from vocals track using PENN
-        vocals_pitch_penn, vocals_confidence_penn, vocals_times_penn = self._extract_pitch_trace_penn(vocals_path)
-        vocals_penn_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_penn.npy"
-        vocals_penn_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_penn_confidence.npy"
-        vocals_penn_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_penn_times.npy"
-        np.save(vocals_penn_data_file, vocals_pitch_penn)
-        np.save(vocals_penn_confidence_file, vocals_confidence_penn)
-        np.save(vocals_penn_times_file, vocals_times_penn)
-        
-        # Calculate confidence statistics for PENN
-        high_conf_frames = np.sum(vocals_confidence_penn > 0.1)
-        conf_percentage = (high_conf_frames / len(vocals_confidence_penn)) * 100
-        
-        results['vocals_penn'] = {
+        results['vocals_swipe'] = {
             "file": str(vocals_path),
-            "algorithm": "penn",
-            "pitch_data_file": str(vocals_penn_data_file),
-            "confidence_data_file": str(vocals_penn_confidence_file),
-            "times_data_file": str(vocals_penn_times_file),
-            "duration": len(vocals_times_penn),
-            "sample_rate": len(vocals_times_penn) / vocals_times_penn[-1] if len(vocals_times_penn) > 0 else 0,
+            "algorithm": "swipe",
+            "pitch_data_file": str(vocals_swipe_data_file),
+            "confidence_data_file": str(vocals_swipe_confidence_file),
+            "times_data_file": str(vocals_swipe_times_file),
+            "duration": len(vocals_times_swipe),
+            "sample_rate": len(vocals_times_swipe) / vocals_times_swipe[-1] if len(vocals_times_swipe) > 0 else 0,
             "high_confidence_frames": int(high_conf_frames),
             "confidence_percentage": conf_percentage,
-            "confidence_min": float(vocals_confidence_penn.min()),
-            "confidence_max": float(vocals_confidence_penn.max()),
-            "confidence_mean": float(vocals_confidence_penn.mean())
+            "confidence_min": float(vocals_confidence_swipe.min()),
+            "confidence_max": float(vocals_confidence_swipe.max()),
+            "confidence_mean": float(vocals_confidence_swipe.mean()),
+            "processing_time": swipe_vocals_time
+        }
+        
+        
+        # Extract pitch trace from vocals track using PyWorld
+        pyworld_start = time.time()
+        vocals_pitch_pyworld, vocals_confidence_pyworld, vocals_times_pyworld = self._extract_pitch_trace_pyworld(vocals_path)
+        pyworld_vocals_time = time.time() - pyworld_start
+        vocals_pyworld_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld.npy"
+        vocals_pyworld_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_confidence.npy"
+        vocals_pyworld_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_pyworld_times.npy"
+        np.save(vocals_pyworld_data_file, vocals_pitch_pyworld)
+        np.save(vocals_pyworld_confidence_file, vocals_confidence_pyworld)
+        np.save(vocals_pyworld_times_file, vocals_times_pyworld)
+        
+        # Calculate confidence statistics for PyWorld
+        high_conf_frames = np.sum(vocals_confidence_pyworld > self.pyworld_threshold)
+        conf_percentage = (high_conf_frames / len(vocals_confidence_pyworld)) * 100
+        
+        results['vocals_pyworld'] = {
+            "file": str(vocals_path),
+            "algorithm": "pyworld",
+            "pitch_data_file": str(vocals_pyworld_data_file),
+            "confidence_data_file": str(vocals_pyworld_confidence_file),
+            "times_data_file": str(vocals_pyworld_times_file),
+            "duration": len(vocals_times_pyworld),
+            "sample_rate": len(vocals_times_pyworld) / vocals_times_pyworld[-1] if len(vocals_times_pyworld) > 0 else 0,
+            "high_confidence_frames": int(high_conf_frames),
+            "confidence_percentage": conf_percentage,
+            "confidence_min": float(vocals_confidence_pyworld.min()),
+            "confidence_max": float(vocals_confidence_pyworld.max()),
+            "confidence_mean": float(vocals_confidence_pyworld.mean()),
+            "processing_time": pyworld_vocals_time
+        }
+        
+        
+        # Extract pitch trace from vocals track using CREPE
+        crepe_start = time.time()
+        vocals_pitch_crepe, vocals_confidence_crepe, vocals_times_crepe = self._extract_pitch_trace_crepe(vocals_path)
+        crepe_vocals_time = time.time() - crepe_start
+        vocals_crepe_data_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe.npy"
+        vocals_crepe_confidence_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_confidence.npy"
+        vocals_crepe_times_file = self.pitch_traces_dir / f"{audio_id}_vocals_crepe_times.npy"
+        np.save(vocals_crepe_data_file, vocals_pitch_crepe)
+        np.save(vocals_crepe_confidence_file, vocals_confidence_crepe)
+        np.save(vocals_crepe_times_file, vocals_times_crepe)
+        
+        # Calculate confidence statistics for CREPE
+        high_conf_frames = np.sum(vocals_confidence_crepe > self.crepe_threshold)
+        conf_percentage = (high_conf_frames / len(vocals_confidence_crepe)) * 100
+        
+        results['vocals_crepe'] = {
+            "file": str(vocals_path),
+            "algorithm": "crepe",
+            "pitch_data_file": str(vocals_crepe_data_file),
+            "confidence_data_file": str(vocals_crepe_confidence_file),
+            "times_data_file": str(vocals_crepe_times_file),
+            "duration": len(vocals_times_crepe),
+            "sample_rate": len(vocals_times_crepe) / vocals_times_crepe[-1] if len(vocals_times_crepe) > 0 else 0,
+            "high_confidence_frames": int(high_conf_frames),
+            "confidence_percentage": conf_percentage,
+            "confidence_min": float(vocals_confidence_crepe.min()),
+            "confidence_max": float(vocals_confidence_crepe.max()),
+            "confidence_mean": float(vocals_confidence_crepe.mean()),
+            "processing_time": crepe_vocals_time
         }
         
         # Create visualizations
@@ -350,13 +375,24 @@ class AutoTranscriptionPipeline:
         """
         Extract pitch trace using Essentia's PredominantPitchMelodia algorithm.
         Returns pitch values, confidence values, and time axis.
+        
+        Parameters optimized for quiet sections:
+        - voicingTolerance: 0.4 (higher than default 0.2 to catch quiet sections)
+        - guessUnvoiced: True (estimate pitch in quiet/unvoiced segments)  
+        - magnitudeThreshold: 20 (lower than default 40 for quiet audio sensitivity)
         """
         # Load audio
         loader = es.MonoLoader(filename=str(audio_path))
         audio = loader()
         
-        # Extract pitch using PredominantPitchMelodia
-        pitch_extractor = es.PredominantPitchMelodia()
+        # Extract pitch using PredominantPitchMelodia with parameters optimized for quiet sections
+        pitch_extractor = es.PredominantPitchMelodia(
+            voicingTolerance=0.4,      # Higher tolerance to capture quiet sections
+            guessUnvoiced=True,        # Estimate pitch in quiet/unvoiced segments
+            magnitudeThreshold=20,     # Lower threshold for quiet audio sensitivity
+            minFrequency=55.0,         # Appropriate for Indian classical music
+            maxFrequency=1760.0        # Cover full vocal range
+        )
         pitch_values, pitch_confidence = pitch_extractor(audio)
         
         # Create time axis
@@ -366,61 +402,120 @@ class AutoTranscriptionPipeline:
         
         return pitch_values, pitch_confidence, times
     
-    def _extract_pitch_trace_penn(self, audio_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _extract_pitch_trace_crepe(self, audio_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Extract pitch trace using PENN (Pitch Estimation using Neural Networks).
+        Extract pitch trace using CREPE (CNN-based pitch estimator).
         Returns pitch values, confidence values, and time axis.
         """
-        import subprocess
-        import tempfile
+        # Load audio with librosa (CREPE's preferred method)
+        y, sr = librosa.load(str(audio_path), sr=16000)  # CREPE works well at 16kHz
         
-        # Always convert to ensure proper format for PENN (mono, 22050 Hz)
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
-            temp_wav_path = Path(temp_wav.name)
+        # Extract pitch using CREPE with 10ms step size (similar to PENN)
+        time, frequency, confidence, activation = crepe.predict(
+            y, sr, 
+            step_size=10,  # 10ms step size
+            verbose=0      # Suppress progress output
+        )
         
-        # Convert to WAV using ffmpeg
-        subprocess.run([
-            'ffmpeg', '-i', str(audio_path), 
-            '-ar', '22050',  # Resample to PENN's expected rate
-            '-ac', '1',      # Convert to mono
-            '-acodec', 'pcm_s16le',  # Ensure proper WAV encoding
-            '-y',            # Overwrite output
-            str(temp_wav_path)
-        ], check=True, capture_output=True)
+        return frequency, confidence, time
+    
+    def _extract_pitch_trace_swipe(self, audio_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Extract pitch trace using SWIPE algorithm from pysptk.
+        Returns pitch values, synthetic confidence values, and time axis.
+        """
+        # Load audio with soundfile
+        wav, sr = sf.read(str(audio_path))
         
-        try:
-            # Extract pitch using PENN from file path
-            pitch_values, confidence_values = penn.from_file(str(temp_wav_path))
-            
-            # Convert results to numpy if they're tensors and flatten if needed
-            if hasattr(pitch_values, 'detach'):
-                pitch_values = pitch_values.detach().cpu().numpy().flatten()
-            if hasattr(confidence_values, 'detach'):
-                confidence_values = confidence_values.detach().cpu().numpy().flatten()
-            
-            # Create time axis - PENN uses 10ms hop size by default
-            hop_size_seconds = 0.01  # 10ms
-            times = np.arange(len(pitch_values)) * hop_size_seconds
-            
-            return pitch_values, confidence_values, times
-            
-        finally:
-            # Clean up temporary file
-            if temp_wav_path.exists():
-                temp_wav_path.unlink()
+        # Ensure mono
+        if len(wav.shape) > 1:
+            wav = wav.mean(axis=1)
+        
+        # Extract pitch using SWIPE
+        hop = int(0.01 * sr)  # 10 ms hop
+        f0_swipe = pysptk.sptk.swipe(wav.astype(np.float64),
+                                    fs=sr,
+                                    hopsize=hop,
+                                    min=55.0,     # fmin (Hz)
+                                    max=1760.0,   # fmax (Hz)
+                                    threshold=0.25,   # voiced/unvoiced
+                                    otype="f0")
+        
+        # Create synthetic confidence based on pitch continuity and strength
+        # SWIPE doesn't provide explicit confidence, so we estimate it
+        confidence = np.ones_like(f0_swipe)
+        confidence[f0_swipe <= 0] = 0.0  # Unvoiced regions get 0 confidence
+        
+        # Add some variability based on pitch stability
+        for i in range(1, len(f0_swipe)-1):
+            if f0_swipe[i] > 0:
+                # Calculate local pitch stability
+                prev_f0 = f0_swipe[i-1] if f0_swipe[i-1] > 0 else f0_swipe[i]
+                next_f0 = f0_swipe[i+1] if f0_swipe[i+1] > 0 else f0_swipe[i]
+                stability = 1.0 - min(0.5, abs(f0_swipe[i] - prev_f0) / f0_swipe[i] + abs(f0_swipe[i] - next_f0) / f0_swipe[i])
+                confidence[i] = max(0.3, stability)  # Keep confidence above 0.3 for voiced regions
+        
+        # Create time axis
+        times = np.arange(len(f0_swipe)) * hop / sr
+        
+        return f0_swipe, confidence, times
+    
+    def _extract_pitch_trace_pyworld(self, audio_path: Path) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Extract pitch trace using PyWorld DIO->StoneMask algorithm.
+        Returns pitch values, synthetic confidence values, and time axis.
+        """
+        # Load audio with soundfile
+        wav, sr = sf.read(str(audio_path))
+        
+        # Ensure mono
+        if len(wav.shape) > 1:
+            wav = wav.mean(axis=1)
+        
+        # PyWorld expects float64
+        wav_f64 = wav.astype(np.float64)
+        
+        # Extract F0 using DIO
+        f0_dio, timeaxis = pyworld.dio(wav_f64, sr, frame_period=10.0)  # 10ms
+        
+        # Refine F0 using StoneMask
+        f0_refined = pyworld.stonemask(wav_f64, f0_dio, timeaxis, sr)
+        
+        # Create synthetic confidence based on pitch values
+        # PyWorld doesn't provide explicit confidence, so we estimate it
+        confidence = np.ones_like(f0_refined)
+        confidence[f0_refined <= 0] = 0.0  # Unvoiced regions get 0 confidence
+        
+        # Add variability based on pitch consistency
+        for i in range(1, len(f0_refined)-1):
+            if f0_refined[i] > 0:
+                # Higher confidence for stable pitch regions
+                if f0_refined[i-1] > 0 and f0_refined[i+1] > 0:
+                    pitch_var = abs(f0_refined[i] - f0_refined[i-1]) + abs(f0_refined[i+1] - f0_refined[i])
+                    confidence[i] = max(0.4, 1.0 - pitch_var / f0_refined[i])
+                else:
+                    confidence[i] = 0.6  # Medium confidence for isolated pitch points
+        
+        return f0_refined, confidence, timeaxis
     
     def _create_pitch_visualizations(self, audio_id: int, metadata: Dict[str, Any], results: Dict[str, Any]):
         """
-        Create matplotlib visualizations comparing all 4 pitch traces with logarithmic frequency scale.
+        Create matplotlib visualizations comparing all 4 vocals pitch traces with logarithmic frequency scale.
         """
-        confidence_threshold = 0.1
+        # Algorithm-specific confidence thresholds
+        confidence_thresholds = {
+            'vocals_essentia': self.essentia_threshold,
+            'vocals_swipe': self.swipe_threshold,
+            'vocals_pyworld': self.pyworld_threshold,
+            'vocals_crepe': self.crepe_threshold
+        }
         
-        # Create comparison plot with all 4 algorithms
+        # Create comparison plot with all 4 vocals algorithms
         fig, ax = plt.subplots(1, 1, figsize=(15, 8))
         
-        colors = ['blue', 'red', 'green', 'orange']
-        labels = ['Essentia Original', 'Essentia Vocals', 'PENN Original', 'PENN Vocals']
-        keys = ['original_essentia', 'vocals_essentia', 'original_penn', 'vocals_penn']
+        colors = ['blue', 'green', 'purple', 'orange']
+        labels = ['Essentia Vocals', 'SWIPE Vocals', 'PyWorld Vocals', 'CREPE Vocals']
+        keys = ['vocals_essentia', 'vocals_swipe', 'vocals_pyworld', 'vocals_crepe']
         
         for i, (key, color, label) in enumerate(zip(keys, colors, labels)):
             if key in results:
@@ -433,7 +528,8 @@ class AutoTranscriptionPipeline:
                 confidence = np.load(confidence_file)
                 times = np.load(times_file)
                 
-                # Filter for high confidence regions
+                # Filter for high confidence regions using algorithm-specific threshold
+                confidence_threshold = confidence_thresholds[key]
                 valid = (confidence > confidence_threshold) & (pitch > 0)
                 
                 if np.any(valid):
@@ -454,10 +550,10 @@ class AutoTranscriptionPipeline:
         plt.close()
         
         # Also create individual algorithm comparison plots
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 10))
+        fig, (ax1, ax2, ax3, ax4) = plt.subplots(1, 4, figsize=(20, 5))
         
         axes = [ax1, ax2, ax3, ax4]
-        titles = ['Essentia - Original Track', 'Essentia - Vocals Track', 'PENN - Original Track', 'PENN - Vocals Track']
+        titles = ['Essentia - Vocals Track', 'SWIPE - Vocals Track', 'PyWorld - Vocals Track', 'CREPE - Vocals Track']
         
         for i, (ax, key, title, color) in enumerate(zip(axes, keys, titles, colors)):
             if key in results:
@@ -470,7 +566,8 @@ class AutoTranscriptionPipeline:
                 confidence = np.load(confidence_file)
                 times = np.load(times_file)
                 
-                # Filter for high confidence regions
+                # Filter for high confidence regions using algorithm-specific threshold
+                confidence_threshold = confidence_thresholds[key]
                 valid = (confidence > confidence_threshold) & (pitch > 0)
                 
                 if np.any(valid):
@@ -482,8 +579,7 @@ class AutoTranscriptionPipeline:
                 ax.set_ylim(80, 2000)
                 ax.set_yscale('log')
                 
-                if i >= 2:  # Bottom row
-                    ax.set_xlabel('Time (s)')
+                ax.set_xlabel('Time (s)')
         
         plt.tight_layout()
         
@@ -524,14 +620,23 @@ class AutoTranscriptionPipeline:
         if len(vocals_audio.shape) > 1:
             vocals_audio = vocals_audio.mean(axis=1)
         
-        confidence_threshold = 0.1
+        # Algorithm-specific confidence thresholds
+        confidence_thresholds = {
+            'vocals_essentia': self.essentia_threshold,
+            'vocals_swipe': self.swipe_threshold,
+            'vocals_pyworld': self.pyworld_threshold,
+            'vocals_crepe': self.crepe_threshold
+        }
         
-        # Generate sine waves for all algorithms
+        # Extract amplitude envelope from vocals track
+        vocals_amplitude_envelope = self._extract_amplitude_envelope(vocals_audio, vocals_sample_rate)
+        
+        # Generate sine waves for vocals algorithms only
         algorithms = {
-            'original_essentia': 'essentia_original',
             'vocals_essentia': 'essentia_vocals', 
-            'original_penn': 'penn_original',
-            'vocals_penn': 'penn_vocals'
+            'vocals_swipe': 'swipe_vocals',
+            'vocals_pyworld': 'pyworld_vocals',
+            'vocals_crepe': 'crepe_vocals'
         }
         
         for key, filename_suffix in algorithms.items():
@@ -545,18 +650,22 @@ class AutoTranscriptionPipeline:
                 confidence = np.load(confidence_file)
                 times = np.load(times_file)
                 
-                # Generate sine wave
+                # Generate sine wave using algorithm-specific threshold
+                confidence_threshold = confidence_thresholds[key]
                 valid = (confidence > confidence_threshold) & (pitch > 0)
                 sine_wave = self._generate_sine_overlay(pitch, valid, times, 
                                                       len(vocals_audio), vocals_sample_rate)
                 
+                # Apply vocals amplitude envelope to sine wave
+                sine_wave_with_envelope = sine_wave * vocals_amplitude_envelope
+                
                 # Normalize to -6dB
-                if np.max(np.abs(sine_wave)) > 0:
-                    sine_wave = sine_wave / np.max(np.abs(sine_wave)) * 0.5
+                if np.max(np.abs(sine_wave_with_envelope)) > 0:
+                    sine_wave_with_envelope = sine_wave_with_envelope / np.max(np.abs(sine_wave_with_envelope)) * 0.5
                 
                 # Save sine wave file
                 sine_file = self.audio_outputs_dir / f"{audio_id}_{filename_suffix}_pitch_sine.wav"
-                sine_int = (sine_wave * 32767).astype(np.int16)
+                sine_int = (sine_wave_with_envelope * 32767).astype(np.int16)
                 wavfile.write(sine_file, vocals_sample_rate, sine_int)
     
     def _generate_sine_overlay(self, pitch_values: np.ndarray, valid_mask: np.ndarray, 
@@ -617,6 +726,32 @@ class AutoTranscriptionPipeline:
                 phase = 0.0
         
         return sine_wave
+    
+    def _extract_amplitude_envelope(self, audio: np.ndarray, sample_rate: int) -> np.ndarray:
+        """
+        Extract amplitude envelope from audio signal using the Hilbert transform.
+        Returns envelope normalized to 0-1 range.
+        """
+        from scipy.signal import hilbert
+        
+        # Use Hilbert transform to get the analytic signal
+        analytic_signal = hilbert(audio)
+        
+        # Get the amplitude envelope (magnitude of analytic signal)
+        amplitude_envelope = np.abs(analytic_signal)
+        
+        # Smooth the envelope to reduce noise
+        # Apply a simple moving average filter
+        window_size = int(0.01 * sample_rate)  # 10ms window
+        if window_size > 1:
+            from scipy.ndimage import uniform_filter1d
+            amplitude_envelope = uniform_filter1d(amplitude_envelope.astype(np.float64), size=window_size)
+        
+        # Normalize to 0-1 range
+        if amplitude_envelope.max() > 0:
+            amplitude_envelope = amplitude_envelope / amplitude_envelope.max()
+        
+        return amplitude_envelope
     
     def _estimate_tonic(self, audio_path: Path) -> float:
         """

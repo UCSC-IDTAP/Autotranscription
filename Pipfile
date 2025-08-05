@@ -10,6 +10,12 @@ essentia = "*"
 matplotlib = "*"
 scipy = "*"
 penn = "*"
+crepe = "*"
+librosa = "*"
+tensorflow = "*"
+soundfile = "*"
+pysptk = "*"
+pyworld = "*"
 
 [dev-packages]
 
