@@ -7,6 +7,9 @@ name = "pypi"
 idtap-api = "*"
 demucs = "*"
 essentia = "*"
+matplotlib = "*"
+scipy = "*"
+penn = "*"
 
 [dev-packages]
 

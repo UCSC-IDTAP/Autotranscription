@@ -139,6 +139,11 @@ output/
 # Pipeline workspace
 pipeline_workspace/
 
+# Generated visualizations
+*.png
+*.jpg
+*.jpeg
+
 # IDE
 .vscode/
 .idea/
