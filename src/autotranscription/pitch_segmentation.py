@@ -318,18 +318,36 @@ class PitchSegmenter:
     
     def segment_pitch_trace_minmax(self, pitch_data: np.ndarray, time_data: np.ndarray, 
                                   raga_object: IDTAPRaga, sample_rate: float = 44100,
-                                  hop_length: int = 512) -> List[Dict[str, Any]]:
+                                  hop_length: int = 512) -> Dict[str, Any]:
         """
-        Alternative segmentation approach based on local minima and maxima.
+        Two-stage segmentation approach based on local minima and maxima.
         
-        1. Find all local minima and maxima in the pitch trace
-        2. Create segments between these extrema
-        3. Merge adjacent segments that fall within the same target pitch threshold
-        4. Label remaining segments as fixed or moving
+        Stage 1: Find very local minima and maxima to create fine-grained segments
+        Stage 2: Merge consecutive segments that all fall within 1/24th octave threshold
+        
+        Returns both stage results for visualization.
         """
         if IDTAPRaga is None or Pitch is None:
             raise ImportError("IDTAP API not available for pitch segmentation")
         
+        # Stage 1: Fine-grained segmentation at every local min/max
+        stage1_segments = self._stage1_fine_segmentation(pitch_data, time_data, raga_object)
+        
+        # Stage 2: Merge segments within threshold
+        stage2_segments = self._stage2_merge_within_threshold(stage1_segments, raga_object)
+        
+        return {
+            'stage1_segments': stage1_segments,
+            'stage2_segments': stage2_segments,
+            'final_segments': stage2_segments  # For backward compatibility
+        }
+    
+    def _stage1_fine_segmentation(self, pitch_data: np.ndarray, time_data: np.ndarray, 
+                                 raga_object: IDTAPRaga) -> List[Dict[str, Any]]:
+        """
+        Stage 1: Create fine-grained segments at every local minimum and maximum.
+        Uses more local detection than the original method.
+        """
         segments = []
         
         # Get target raga pitches in the frequency range
@@ -370,14 +388,85 @@ class PitchSegmenter:
                     i += 1
                 segment_end = i
                 
-                # Process this pitched region with minima/maxima approach
-                pitched_segments = self._segment_pitched_region_minmax(
+                # Process this pitched region with very fine min/max approach
+                pitched_segments = self._segment_pitched_region_very_fine(
                     segment_start, segment_end, pitch_data, log_pitch_data, 
                     time_data, target_pitches, target_log_freqs
                 )
                 segments.extend(pitched_segments)
         
         return segments
+    
+    def _stage2_merge_within_threshold(self, stage1_segments: List[Dict[str, Any]], 
+                                     raga_object: IDTAPRaga) -> List[Dict[str, Any]]:
+        """
+        Stage 2: Merge consecutive 'fixed' segments that are fixed to the same target pitch.
+        Only merges consecutive segments if both are 'fixed' and have the same target pitch.
+        """
+        if len(stage1_segments) <= 1:
+            return stage1_segments
+        
+        # Get target pitches for comparison
+        pitch_data_all = np.concatenate([seg['data'] for seg in stage1_segments if 'data' in seg])
+        min_freq = np.nanmin(pitch_data_all) if len(pitch_data_all) > 0 and not np.isnan(np.nanmin(pitch_data_all)) else 75
+        max_freq = np.nanmax(pitch_data_all) if len(pitch_data_all) > 0 and not np.isnan(np.nanmax(pitch_data_all)) else 800
+        target_pitches = raga_object.get_pitches(low=max(min_freq*0.8, 75), 
+                                                high=min(max_freq*1.2, 2400))
+        target_log_freqs = [p.non_offset_log_freq for p in target_pitches]
+        
+        merged_segments = []
+        current_fixed_group = []
+        current_target_pitch_idx = None
+        
+        for segment in stage1_segments:
+            if segment['type'] == 'silence':
+                # Process any current fixed group first
+                if current_fixed_group:
+                    merged_seg = self._merge_fixed_segment_group(current_fixed_group, target_pitches, target_log_freqs)
+                    merged_segments.append(merged_seg)
+                    current_fixed_group = []
+                    current_target_pitch_idx = None
+                
+                # Add silence segment as-is
+                merged_segments.append(segment)
+                continue
+            
+            if segment['type'] == 'fixed':
+                # Determine which target pitch this fixed segment corresponds to
+                seg_target_idx = self._get_segment_target_pitch_index(segment, target_log_freqs)
+                
+                # Check if we can merge with the current group
+                if (current_target_pitch_idx is not None and 
+                    seg_target_idx == current_target_pitch_idx and
+                    len(current_fixed_group) > 0):
+                    # Add to current group - same target pitch
+                    current_fixed_group.append(segment)
+                else:
+                    # Process current group if it exists
+                    if current_fixed_group:
+                        merged_seg = self._merge_fixed_segment_group(current_fixed_group, target_pitches, target_log_freqs)
+                        merged_segments.append(merged_seg)
+                    
+                    # Start new group
+                    current_fixed_group = [segment]
+                    current_target_pitch_idx = seg_target_idx
+            else:
+                # Moving segment - process any current fixed group first, then add moving segment as-is
+                if current_fixed_group:
+                    merged_seg = self._merge_fixed_segment_group(current_fixed_group, target_pitches, target_log_freqs)
+                    merged_segments.append(merged_seg)
+                    current_fixed_group = []
+                    current_target_pitch_idx = None
+                
+                # Add moving segment as-is (no merging)
+                merged_segments.append(segment)
+        
+        # Don't forget the last fixed group
+        if current_fixed_group:
+            merged_seg = self._merge_fixed_segment_group(current_fixed_group, target_pitches, target_log_freqs)
+            merged_segments.append(merged_seg)
+        
+        return merged_segments
     
     def _segment_pitched_region_minmax(self, start_idx: int, end_idx: int, 
                                      pitch_data: np.ndarray, log_pitch_data: np.ndarray,
@@ -480,20 +569,28 @@ class PitchSegmenter:
         closest_target_pitch = target_pitches[closest_target_idx]
         closest_target_log_freq = target_log_freqs[closest_target_idx]
         
-        # Check if this region is stable (fixed) or moving
-        freq_range = np.max(valid_log_freqs) - np.min(valid_log_freqs)
-        is_stable = freq_range <= self.log_freq_threshold
-        is_near_target = abs(mean_log_freq - closest_target_log_freq) <= self.log_freq_threshold
+        # Check if there exists ANY target pitch such that ALL frequencies are within threshold of that SAME target
+        fixed_target_pitch = None
+        fixed_target_log_freq = None
         
-        if is_stable and is_near_target:
-            # Fixed segment
-            mean_log_offset = mean_log_freq - closest_target_log_freq
+        for target_idx, target_log_freq in enumerate(target_log_freqs):
+            # Check if ALL frequencies in the segment are within threshold of this specific target
+            all_within_this_target = all(abs(freq - target_log_freq) <= self.log_freq_threshold 
+                                       for freq in valid_log_freqs)
+            if all_within_this_target:
+                fixed_target_pitch = target_pitches[target_idx]
+                fixed_target_log_freq = target_log_freq
+                break
+        
+        if fixed_target_pitch is not None:
+            # Fixed segment - all frequencies within threshold distance of the same target pitch
+            mean_log_offset = mean_log_freq - fixed_target_log_freq
             return [self._create_fixed_pitch_segment(
                 start_idx, end_idx, time_data, pitch_data[start_idx:end_idx],
-                closest_target_pitch, mean_log_offset, True
+                fixed_target_pitch, mean_log_offset, True
             )]
         else:
-            # Moving segment
+            # Moving segment - either not stable or doesn't stay within threshold of any single target
             start_freq = valid_log_freqs[0]
             end_freq = valid_log_freqs[-1]
             
@@ -734,6 +831,163 @@ class PitchSegmenter:
             return 0.0
             
         return np.mean(seg_data[valid_mask])
+
+    def _segment_pitched_region_very_fine(self, start_idx: int, end_idx: int, 
+                                         pitch_data: np.ndarray, log_pitch_data: np.ndarray,
+                                         time_data: np.ndarray, target_pitches: List[Pitch],
+                                         target_log_freqs: List[float]) -> List[Dict[str, Any]]:
+        """
+        Segment a pitched region using very fine local minima and maxima detection.
+        Uses gradient-based approach for more sensitivity.
+        """
+        if end_idx - start_idx < 3:
+            return self._create_single_segment_from_region(
+                start_idx, end_idx, pitch_data, log_pitch_data, 
+                time_data, target_pitches, target_log_freqs
+            )
+        
+        region_log_pitch = log_pitch_data[start_idx:end_idx]
+        valid_mask = ~np.isnan(region_log_pitch)
+        
+        if not np.any(valid_mask):
+            return []
+        
+        # Use gradient-based approach for very fine extrema detection
+        extrema_indices = self._find_very_local_extrema(region_log_pitch, valid_mask)
+        
+        # Convert back to global indices
+        extrema_indices = [idx + start_idx for idx in extrema_indices]
+        
+        # Add start and end points
+        segment_boundaries = [start_idx] + extrema_indices + [end_idx]
+        segment_boundaries = sorted(list(set(segment_boundaries)))
+        
+        # Create segments between extrema
+        segments = []
+        for i in range(len(segment_boundaries) - 1):
+            seg_start = segment_boundaries[i]
+            seg_end = segment_boundaries[i + 1]
+            
+            if seg_end > seg_start:
+                segment = self._create_single_segment_from_region(
+                    seg_start, seg_end, pitch_data, log_pitch_data,
+                    time_data, target_pitches, target_log_freqs
+                )[0]
+                segments.append(segment)
+        
+        return segments
+    
+    def _find_very_local_extrema(self, log_pitch_data: np.ndarray, valid_mask: np.ndarray) -> List[int]:
+        """Find EVERY local minimum and maximum using scipy.signal.find_peaks."""
+        from scipy.signal import find_peaks
+        
+        extrema = []
+        
+        if len(log_pitch_data) < 3:
+            return extrema
+        
+        # Create a clean array for peak finding (interpolate over NaN values)
+        clean_data = log_pitch_data.copy()
+        nan_mask = np.isnan(clean_data)
+        
+        if np.all(nan_mask):
+            return extrema
+        
+        # Simple interpolation over NaN values for peak detection
+        if np.any(nan_mask):
+            valid_indices = np.where(~nan_mask)[0]
+            if len(valid_indices) < 2:
+                return extrema
+            clean_data = np.interp(np.arange(len(clean_data)), valid_indices, clean_data[valid_indices])
+        
+        # Find maxima (peaks)
+        maxima_indices, _ = find_peaks(clean_data, distance=1)
+        
+        # Find minima (peaks in inverted data)
+        minima_indices, _ = find_peaks(-clean_data, distance=1)
+        
+        # Combine and sort all extrema
+        all_extrema = np.concatenate([maxima_indices, minima_indices])
+        extrema = sorted(all_extrema.tolist())
+        
+        # Filter out indices that correspond to NaN values in original data
+        extrema = [i for i in extrema if not np.isnan(log_pitch_data[i])]
+        
+        return extrema
+    
+    def _get_segment_target_pitch_index(self, segment: Dict[str, Any], 
+                                       target_log_freqs: List[float]) -> int:
+        """Get the index of the target pitch closest to this segment."""
+        rep_freq = self._get_segment_representative_log_frequency(segment)
+        if rep_freq == 0:
+            return -1
+        return int(np.argmin([abs(rep_freq - tlf) for tlf in target_log_freqs]))
+    
+    def _is_segment_within_threshold(self, segment: Dict[str, Any], 
+                                   target_pitches: List[Pitch], 
+                                   target_log_freqs: List[float]) -> bool:
+        """Check if segment is within 1/24th octave threshold of a target pitch."""
+        rep_freq = self._get_segment_representative_log_frequency(segment)
+        if rep_freq == 0:
+            return False
+        
+        # Find distance to closest target
+        min_distance = min([abs(rep_freq - tlf) for tlf in target_log_freqs])
+        return min_distance <= self.log_freq_threshold
+    
+    def _merge_fixed_segment_group(self, segment_group: List[Dict[str, Any]], 
+                                  target_pitches: List[Pitch], 
+                                  target_log_freqs: List[float]) -> Dict[str, Any]:
+        """
+        Merge a group of consecutive 'fixed' segments that all have the same target pitch.
+        Only called for groups of fixed segments, so the result is always a fixed segment.
+        """
+        if len(segment_group) == 1:
+            # Single segment - just return it as-is
+            return segment_group[0].copy()
+        
+        # Merge multiple fixed segments with the same target pitch
+        first_seg = segment_group[0]
+        last_seg = segment_group[-1]
+        
+        # Combine data arrays
+        all_data = []
+        for seg in segment_group:
+            if 'data' in seg:
+                all_data.extend(seg['data'])
+        
+        valid_data = [d for d in all_data if not np.isnan(d) and d > 0]
+        
+        # Calculate merged segment properties
+        merged_segment = {
+            'type': 'fixed',
+            'start_time': first_seg['start_time'],
+            'duration': (last_seg['start_time'] + last_seg['duration']) - first_seg['start_time'],
+            'in_raga': first_seg.get('in_raga', True),
+            '_start_idx': first_seg['_start_idx'],
+            '_end_idx': last_seg['_end_idx'],
+            'data': np.array(all_data)
+        }
+        
+        # Determine target pitch and log offset for the merged segment
+        if valid_data:
+            mean_log_freq = np.mean([np.log2(d) for d in valid_data])
+            closest_idx = np.argmin([abs(mean_log_freq - tlf) for tlf in target_log_freqs])
+            closest_target = target_pitches[closest_idx]
+            closest_log_freq = target_log_freqs[closest_idx]
+            
+            merged_segment.update({
+                'pitch': closest_target,
+                'log_offset': mean_log_freq - closest_log_freq
+            })
+        else:
+            # Fallback - use the first segment's pitch info
+            merged_segment.update({
+                'pitch': first_seg.get('pitch', target_pitches[0]),
+                'log_offset': first_seg.get('log_offset', 0.0)
+            })
+        
+        return merged_segment
 
 
 def segment_pitch_trace_pipeline(audio_id: int, workspace_dir: Union[str, Path],

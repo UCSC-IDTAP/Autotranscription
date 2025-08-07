@@ -509,8 +509,8 @@ class AutoTranscriptionPipeline:
             self._save_segmentation_data(audio_id, segments_original, suffix="_original")
             self._create_segmentation_visualization(audio_id, segments_original, suffix="_original")
             
-            # Approach 2: Minima/Maxima approach
-            print("🔄 Running minima/maxima segmentation approach...")
+            # Approach 2: Two-stage Minima/Maxima approach
+            print("🔄 Running two-stage minima/maxima segmentation approach...")
             
             # Load pitch data for minmax approach
             pitch_file = self.workspace_dir / "data" / "pitch_traces" / f"{audio_id}_vocals_essentia.npy"
@@ -519,16 +519,28 @@ class AutoTranscriptionPipeline:
             pitch_data = np.load(pitch_file)
             time_data = np.load(time_file)
             
-            segments_minmax = segmenter.segment_pitch_trace_minmax(
+            # Get both stages from the new method
+            minmax_results = segmenter.segment_pitch_trace_minmax(
                 pitch_data, time_data, self.current_raga_object
             )
             
-            # Save and visualize minmax approach
-            self._save_segmentation_data(audio_id, segments_minmax, suffix="_minmax")
-            self._create_segmentation_visualization(audio_id, segments_minmax, suffix="_minmax")
+            # Extract both stages
+            stage1_segments = minmax_results['stage1_segments']
+            stage2_segments = minmax_results['stage2_segments']
             
-            # Use original approach for final results (for now)
-            segments = segments_original
+            print(f"   Stage 1 (Fine segmentation): {len(stage1_segments)} segments")
+            print(f"   Stage 2 (Merged segments): {len(stage2_segments)} segments")
+            
+            # Save and visualize Stage 1 (fine segmentation)
+            self._save_segmentation_data(audio_id, stage1_segments, suffix="_stage1")
+            self._create_segmentation_visualization(audio_id, stage1_segments, suffix="_stage1")
+            
+            # Save and visualize Stage 2 (merged segmentation)  
+            self._save_segmentation_data(audio_id, stage2_segments, suffix="_stage2")
+            self._create_segmentation_visualization(audio_id, stage2_segments, suffix="_stage2")
+            
+            # Use Stage 2 (merged) segments for final results
+            segments = stage2_segments
             
             # Convert segments to JSON-serializable format
             segments_data = []
