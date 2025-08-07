@@ -207,12 +207,14 @@ class PitchExtractor:
         audio = loader()
         
         # Extract pitch using PredominantPitchMelodia with parameters optimized for quiet sections
+        # and enhanced octave error filtering
         pitch_extractor = es.PredominantPitchMelodia(
             voicingTolerance=0.4,      # Higher tolerance to capture quiet sections
             guessUnvoiced=True,        # Estimate pitch in quiet/unvoiced segments
             magnitudeThreshold=20,     # Lower threshold for quiet audio sensitivity
             minFrequency=55.0,         # Appropriate for Indian classical music
-            maxFrequency=1760.0        # Cover full vocal range
+            maxFrequency=1760.0,       # Cover full vocal range
+            filterIterations=5         # Increased from default 3 for better octave error filtering
         )
         pitch_values, pitch_confidence = pitch_extractor(audio)
         

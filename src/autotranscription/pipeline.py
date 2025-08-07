@@ -18,6 +18,7 @@ import numpy as np
 try:
     from .audio_separator import AudioSeparator
     from .pitch_extraction import PitchExtractor
+    from .pitch_cleaning import PitchCleaner
     from .tonic_estimation import TonicEstimator
     from .visualization import SargamVisualizer
     from .audio_processing import AudioProcessor
@@ -26,6 +27,7 @@ try:
 except ImportError:
     from audio_separator import AudioSeparator
     from pitch_extraction import PitchExtractor
+    from pitch_cleaning import PitchCleaner
     from tonic_estimation import TonicEstimator
     from visualization import SargamVisualizer
     from audio_processing import AudioProcessor
@@ -53,6 +55,7 @@ class AutoTranscriptionPipeline:
     1. Audio separation (vocals/instrumental)
     2. Tonic estimation
     3. Pitch trace extraction
+    3.5. Pitch cleaning (octave jump correction)
     4. Raga estimation using TDMS
     5. Pitch segmentation (fixed/moving/silence)
     6. Visualization generation
@@ -92,6 +95,7 @@ class AutoTranscriptionPipeline:
         # Initialize modular components
         self.audio_separator = AudioSeparator(model_name=audio_separator_model)
         self.pitch_extractor = PitchExtractor(algorithms=algorithms)
+        self.pitch_cleaner = PitchCleaner()
         self.tonic_estimator = TonicEstimator()
         self.raga_estimator = RagaEstimator(models_dir=self.workspace_dir / "raga_models")
         self.visualizer = SargamVisualizer(self.visualizations_dir)
@@ -208,6 +212,15 @@ class AutoTranscriptionPipeline:
             self.save_metadata(audio_id, metadata)
         else:
             pitch_results = metadata["results"]["pitch_trace"]
+        
+        # Stage 3.5: Pitch Cleaning (Octave Jump Correction)
+        if "pitch_cleaning" not in metadata["stages_completed"]:
+            cleaning_results = self._run_pitch_cleaning(audio_id, metadata)
+            metadata["results"]["pitch_cleaning"] = cleaning_results
+            metadata["stages_completed"].append("pitch_cleaning")
+            self.save_metadata(audio_id, metadata)
+        else:
+            cleaning_results = metadata["results"]["pitch_cleaning"]
         
         # Stage 4: Raga Estimation
         if "raga_estimation" not in metadata["stages_completed"]:
@@ -362,6 +375,66 @@ class AutoTranscriptionPipeline:
         )
         
         return pitch_results
+    
+    def _run_pitch_cleaning(self, audio_id: int, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Run pitch cleaning stage to remove octave jumps and artifacts."""
+        pitch_results = metadata["results"]["pitch_trace"]
+        
+        cleaning_results = {}
+        
+        # Clean pitch data for each algorithm that was used
+        for algorithm_key, algorithm_data in pitch_results.items():
+            if not algorithm_key.startswith('vocals_'):
+                continue
+                
+            # Load the original pitch data
+            pitch_file = Path(algorithm_data["pitch_data_file"])
+            confidence_file = Path(algorithm_data["confidence_data_file"])
+            times_file = Path(algorithm_data["times_data_file"])
+            
+            if not all(f.exists() for f in [pitch_file, confidence_file, times_file]):
+                print(f"⚠️  Skipping cleaning for {algorithm_key}: missing data files")
+                continue
+            
+            print(f"🧹 Cleaning pitch data for {algorithm_key}...")
+            
+            # Load pitch data
+            pitch_data = np.load(pitch_file)
+            confidence_data = np.load(confidence_file)
+            times_data = np.load(times_file)
+            
+            # Clean the pitch data
+            cleaned_pitch, cleaning_stats = self.pitch_cleaner.clean_pitch_trace(
+                pitch_data, confidence_data, times_data
+            )
+            
+            # Save cleaned data and get file information
+            algorithm_name = algorithm_key.replace('vocals_', '')
+            clean_results = self.pitch_cleaner.save_cleaning_results(
+                audio_id, algorithm_name, cleaned_pitch, cleaning_stats, self.pitch_traces_dir
+            )
+            
+            # Store results
+            cleaning_results[algorithm_key] = {
+                **clean_results,
+                'original_pitch_file': str(pitch_file),
+                'original_octave_jumps': cleaning_stats['octave_jumps_detected'],
+                'octave_jumps_corrected': cleaning_stats['octave_jumps_corrected'],
+                'correction_rate': (cleaning_stats['octave_jumps_corrected'] / 
+                                  max(cleaning_stats['octave_jumps_detected'], 1)) * 100
+            }
+            
+            print(f"  ✅ Detected {cleaning_stats['octave_jumps_detected']} octave jumps")
+            print(f"  ✅ Corrected {cleaning_stats['octave_jumps_corrected']} octave jumps")
+            if cleaning_stats['corrections_applied']:
+                total_corrected_duration = sum(
+                    c['duration_frames'] for c in cleaning_stats['corrections_applied']
+                )
+                print(f"  ✅ Total corrected duration: {total_corrected_duration} frames")
+        
+        print(f"🧹 Pitch cleaning completed for {len(cleaning_results)} algorithms")
+        
+        return cleaning_results
     
     def _run_raga_estimation(self, audio_id: int, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """Run raga estimation stage using RagaEstimator with TDMS."""
