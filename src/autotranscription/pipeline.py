@@ -9,6 +9,11 @@ import json
 import shutil
 from pathlib import Path
 from typing import Union, Dict, Any, Optional
+import numpy as np
+
+def _raise_json_error(o: Any):
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+import numpy as np
 
 try:
     from .audio_separator import AudioSeparator
@@ -130,7 +135,12 @@ class AutoTranscriptionPipeline:
         """Save metadata for a given audio ID."""
         metadata_file = self.metadata_dir / f"{audio_id}.json"
         with open(metadata_file, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            json.dump(
+                metadata,
+                f,
+                indent=2,
+                default=lambda o: o.item() if isinstance(o, np.generic) else (_raise_json_error(o))
+            )
     
     def run(self, input_file: Union[str, Path], audio_id: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -484,19 +494,41 @@ class AutoTranscriptionPipeline:
             }
         
         try:
-            # Initialize pitch segmenter with shorter minimum duration for finer detail
-            segmenter = PitchSegmenter(min_duration=0.02)  # 20ms minimum
+            import numpy as np
             
-            # Perform segmentation
-            segments = segmenter.segment_from_pipeline_data(
+            # Initialize pitch segmenter
+            segmenter = PitchSegmenter(min_duration=0.05)  # 50ms minimum
+            
+            # Approach 1: Original approach with post-processing
+            print("🔄 Running original segmentation approach...")
+            segments_original = segmenter.segment_from_pipeline_data(
                 audio_id, self.workspace_dir, self.current_raga_object
             )
             
-            # Save detailed segmentation data to files
-            self._save_segmentation_data(audio_id, segments)
+            # Save and visualize original approach
+            self._save_segmentation_data(audio_id, segments_original, suffix="_original")
+            self._create_segmentation_visualization(audio_id, segments_original, suffix="_original")
             
-            # Create segmentation visualization
-            self._create_segmentation_visualization(audio_id, segments)
+            # Approach 2: Minima/Maxima approach
+            print("🔄 Running minima/maxima segmentation approach...")
+            
+            # Load pitch data for minmax approach
+            pitch_file = self.workspace_dir / "data" / "pitch_traces" / f"{audio_id}_vocals_essentia.npy"
+            time_file = self.workspace_dir / "data" / "pitch_traces" / f"{audio_id}_vocals_essentia_times.npy"
+            
+            pitch_data = np.load(pitch_file)
+            time_data = np.load(time_file)
+            
+            segments_minmax = segmenter.segment_pitch_trace_minmax(
+                pitch_data, time_data, self.current_raga_object
+            )
+            
+            # Save and visualize minmax approach
+            self._save_segmentation_data(audio_id, segments_minmax, suffix="_minmax")
+            self._create_segmentation_visualization(audio_id, segments_minmax, suffix="_minmax")
+            
+            # Use original approach for final results (for now)
+            segments = segments_original
             
             # Convert segments to JSON-serializable format
             segments_data = []
@@ -505,7 +537,7 @@ class AutoTranscriptionPipeline:
                     'type': segment['type'],
                     'start_time': float(segment['start_time']),
                     'duration': float(segment['duration']),
-                    'in_raga': segment.get('in_raga', True)
+                    'in_raga': bool(segment.get('in_raga', True))
                 }
                 
                 if segment['type'] == 'fixed':
@@ -546,13 +578,13 @@ class AutoTranscriptionPipeline:
             print(f"⚠️  {error_msg}")
             return {"error": error_msg}
     
-    def _save_segmentation_data(self, audio_id: int, segments: list):
+    def _save_segmentation_data(self, audio_id: int, segments: list, suffix: str = ""):
         """Save detailed segmentation data to files for inspection."""
         import json
         import numpy as np
         
         # Create detailed segments file with full data
-        segments_file = self.segmentation_dir / f"{audio_id}_segments.json"
+        segments_file = self.segmentation_dir / f"{audio_id}_segments{suffix}.json"
         detailed_segments = []
         
         for i, segment in enumerate(segments):
@@ -561,7 +593,7 @@ class AutoTranscriptionPipeline:
                 'type': segment['type'],
                 'start_time': float(segment['start_time']),
                 'duration': float(segment['duration']),
-                'in_raga': segment.get('in_raga', True),
+                'in_raga': bool(segment.get('in_raga', True)),
                 'start_idx': int(segment['_start_idx']),
                 'end_idx': int(segment['_end_idx'])
             }
@@ -603,7 +635,7 @@ class AutoTranscriptionPipeline:
             
             # Save individual segment pitch data arrays
             if 'data' in segment and segment['data'].size > 0:
-                segment_data_file = self.segmentation_dir / f"{audio_id}_segment_{i:03d}_data.npy"
+                segment_data_file = self.segmentation_dir / f"{audio_id}_segment_{i:03d}_data{suffix}.npy"
                 np.save(segment_data_file, segment['data'])
         
         # Save the segments JSON file
@@ -611,7 +643,7 @@ class AutoTranscriptionPipeline:
             json.dump(detailed_segments, f, indent=2)
         
         # Create a summary file
-        summary_file = self.segmentation_dir / f"{audio_id}_summary.txt"
+        summary_file = self.segmentation_dir / f"{audio_id}_summary{suffix}.txt"
         with open(summary_file, 'w') as f:
             f.write(f"Pitch Segmentation Summary for Audio ID: {audio_id}\n")
             f.write("=" * 50 + "\n\n")
@@ -662,7 +694,7 @@ class AutoTranscriptionPipeline:
         print(f"   - {summary_file.name}: Human-readable summary")
         print(f"   - Individual segment data arrays: {audio_id}_segment_*.npy")
     
-    def _create_segmentation_visualization(self, audio_id: int, segments: list):
+    def _create_segmentation_visualization(self, audio_id: int, segments: list, suffix: str = ""):
         """Create a detailed visualization of pitch segmentation."""
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
@@ -827,7 +859,7 @@ class AutoTranscriptionPipeline:
             plt.tight_layout()
             
             # Save visualization
-            viz_file = self.visualizations_dir / f"{audio_id}_pitch_segmentation.png"
+            viz_file = self.visualizations_dir / f"{audio_id}_pitch_segmentation{suffix}.png"
             plt.savefig(viz_file, dpi=150, bbox_inches='tight')
             plt.close()
             
