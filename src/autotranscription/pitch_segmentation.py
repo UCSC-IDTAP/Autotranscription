@@ -42,6 +42,8 @@ class PitchSegmenter:
         self.min_duration = min_duration
         self.log_freq_threshold = 1/24  # ±1/24 units (half semitone, ~50 cents)
         self.short_fixed_threshold = 0.2  # Threshold for merging short fixed segments (seconds)
+        # Allow lenient fixed classification when most frames lie on the same target
+        self.fixed_majority_ratio = 0.9  # 90% of frames within threshold counts as fixed
     
     def segment_pitch_trace(self, pitch_data: np.ndarray, time_data: np.ndarray, 
                           raga_object: IDTAPRaga, sample_rate: float = 44100,
@@ -589,18 +591,32 @@ class PitchSegmenter:
                 start_idx, end_idx, time_data, pitch_data[start_idx:end_idx],
                 fixed_target_pitch, mean_log_offset, True
             )]
-        else:
-            # Moving segment - either not stable or doesn't stay within threshold of any single target
-            start_freq = valid_log_freqs[0]
-            end_freq = valid_log_freqs[-1]
-            
-            start_pitch, start_in_raga = self._find_closest_pitch(start_freq, target_pitches, target_log_freqs)
-            end_pitch, end_in_raga = self._find_closest_pitch(end_freq, target_pitches, target_log_freqs)
-            
-            return [self._create_moving_pitch_segment(
-                start_idx, end_idx, time_data, pitch_data[start_idx:end_idx],
-                start_pitch, end_pitch, start_in_raga and end_in_raga
-            )]
+
+        # Majority-based fixed heuristic: if start and end lie on the same target and
+        # the majority of frames (> fixed_majority_ratio) are within threshold to that target,
+        # classify as fixed. This reduces false "moving" for tiny jitter.
+        start_target_idx = int(np.argmin([abs(valid_log_freqs[0] - tlf) for tlf in target_log_freqs]))
+        end_target_idx = int(np.argmin([abs(valid_log_freqs[-1] - tlf) for tlf in target_log_freqs]))
+        if start_target_idx == end_target_idx:
+            candidate_target_log = target_log_freqs[start_target_idx]
+            close_frac = np.mean(np.abs(valid_log_freqs - candidate_target_log) <= self.log_freq_threshold)
+            if close_frac >= self.fixed_majority_ratio:
+                candidate_pitch = target_pitches[start_target_idx]
+                mean_log_offset = float(np.mean(valid_log_freqs - candidate_target_log))
+                return [self._create_fixed_pitch_segment(
+                    start_idx, end_idx, time_data, pitch_data[start_idx:end_idx],
+                    candidate_pitch, mean_log_offset, True
+                )]
+
+        # Otherwise treat as moving
+        start_freq = valid_log_freqs[0]
+        end_freq = valid_log_freqs[-1]
+        start_pitch, start_in_raga = self._find_closest_pitch(start_freq, target_pitches, target_log_freqs)
+        end_pitch, end_in_raga = self._find_closest_pitch(end_freq, target_pitches, target_log_freqs)
+        return [self._create_moving_pitch_segment(
+            start_idx, end_idx, time_data, pitch_data[start_idx:end_idx],
+            start_pitch, end_pitch, start_in_raga and end_in_raga
+        )]
     
     def _merge_segments_by_target_pitch(self, segments: List[Dict[str, Any]], 
                                       target_pitches: List[Pitch], 
