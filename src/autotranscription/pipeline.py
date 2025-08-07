@@ -656,8 +656,6 @@ class AutoTranscriptionPipeline:
                     'moving': sum(1 for s in segments_data if s['type'] == 'moving'),
                     'silence': sum(1 for s in segments_data if s['type'] == 'silence')
                 },
-                'in_raga_segments': sum(1 for s in segments_data if s.get('in_raga', True)),
-                'out_of_raga_segments': sum(1 for s in segments_data if not s.get('in_raga', True)),
                 'total_duration': sum(s['duration'] for s in segments_data)
             }
             
@@ -665,8 +663,7 @@ class AutoTranscriptionPipeline:
             print(f"   Fixed: {results['segment_types']['fixed']}, "
                   f"Moving: {results['segment_types']['moving']}, "
                   f"Silence: {results['segment_types']['silence']}")
-            print(f"   In-raga: {results['in_raga_segments']}, "
-                  f"Out-of-raga: {results['out_of_raga_segments']}")
+            # No in-raga/out-of-raga reporting
             
             return results
             
@@ -747,23 +744,15 @@ class AutoTranscriptionPipeline:
             f.write(f"Total segments: {len(segments)}\n")
             
             types_count = {'fixed': 0, 'moving': 0, 'silence': 0}
-            in_raga_count = 0
-            out_of_raga_count = 0
             total_duration = 0
             
             for segment in segments:
                 types_count[segment['type']] += 1
-                if segment.get('in_raga', True):
-                    in_raga_count += 1
-                else:
-                    out_of_raga_count += 1
                 total_duration += segment['duration']
             
             f.write(f"Fixed pitch segments: {types_count['fixed']}\n")
             f.write(f"Moving pitch segments: {types_count['moving']}\n")
             f.write(f"Silence segments: {types_count['silence']}\n")
-            f.write(f"In-raga segments: {in_raga_count}\n")
-            f.write(f"Out-of-raga segments: {out_of_raga_count}\n")
             f.write(f"Total duration: {total_duration:.2f}s\n\n")
             
             f.write("Segment Details:\n")
@@ -772,7 +761,7 @@ class AutoTranscriptionPipeline:
             for i, segment in enumerate(segments):
                 f.write(f"Segment {i:03d}: {segment['type'].upper()}\n")
                 f.write(f"  Time: {segment['start_time']:.3f}s - {segment['start_time'] + segment['duration']:.3f}s ({segment['duration']:.3f}s)\n")
-                f.write(f"  In-raga: {segment.get('in_raga', True)}\n")
+                # No in-raga/out-of-raga annotation in summary
                 
                 if segment['type'] == 'fixed':
                     pitch = segment['pitch']
@@ -879,7 +868,7 @@ class AutoTranscriptionPipeline:
                 ax1.set_yticks(y_ticks)
                 ax1.set_yticklabels(y_labels)
             
-            # Color-code segments and add boundaries
+            # Color-code segments and add boundaries (no out-of-raga indication)
             colors = {'fixed': 'red', 'moving': 'orange', 'silence': 'gray'}
             segment_heights = []
             
@@ -894,9 +883,9 @@ class AutoTranscriptionPipeline:
                 if i == len(segments) - 1:  # Add end line for last segment
                     ax1.axvline(x=end_time, color='black', linestyle='-', alpha=0.8, linewidth=1.5)
                 
-                # Add segment background shading
+                # Add segment background shading (no in/out-of-raga distinction)
                 y_min, y_max = ax1.get_ylim()
-                alpha_val = 0.3 if in_raga else 0.15
+                alpha_val = 0.3
                 ax1.axvspan(start_time, end_time, 
                            color=colors[segment_type], alpha=alpha_val, 
                            label=f'{segment_type.title()}' if i == 0 or segment_type != segments[i-1]['type'] else "")
@@ -918,15 +907,15 @@ class AutoTranscriptionPipeline:
             
             # Remove all legends to clean up the visualization - colors are self-explanatory
             
-            # Plot 2: Segment type timeline
+            # Plot 2: Segment type timeline (no out-of-raga indication)
             for start_time, end_time, segment_type, in_raga in segment_heights:
                 y_pos = 0.5
                 height = 0.8
                 
-                # Color and pattern for segment type and raga status
+                # Color only by type; no hatch or alpha changes for in/out-of-raga
                 color = colors[segment_type]
-                alpha_val = 0.8 if in_raga else 0.4
-                hatch = '' if in_raga else '///'
+                alpha_val = 0.8
+                hatch = ''
                 
                 rect = patches.Rectangle((start_time, y_pos - height/2), 
                                        end_time - start_time, height,
@@ -939,7 +928,7 @@ class AutoTranscriptionPipeline:
                     mid_time = (start_time + end_time) / 2
                     ax2.text(mid_time, y_pos, segment_type[0].upper(), 
                             ha='center', va='center', fontsize=10, fontweight='bold',
-                            color='white' if in_raga else 'black')
+                            color='white')
             
             # Customize timeline plot
             ax2.set_xlim(ax1.get_xlim())
@@ -951,7 +940,6 @@ class AutoTranscriptionPipeline:
             
             # Remove the legend to save vertical space - colors are self-explanatory
             # Red = Fixed pitch, Orange = Moving pitch, Gray = Silence
-            # Solid = In-raga, Hatched = Out-of-raga
             
             plt.tight_layout()
             
