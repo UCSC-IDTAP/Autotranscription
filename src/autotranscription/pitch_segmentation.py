@@ -32,7 +32,7 @@ class PitchSegmenter:
     3. Silence: regions with no valid pitch data
     """
     
-    def __init__(self, min_duration: float = 0.05):
+    def __init__(self, min_duration: float = 0.25):
         """
         Initialize the pitch segmenter.
         
@@ -395,10 +395,7 @@ class PitchSegmenter:
                 )
                 segments.extend(pitched_segments)
         
-        # Apply duration filtering to all segments
-        filtered_segments = self._filter_segments_by_duration(segments)
-        
-        return filtered_segments
+        return segments
     
     def _stage2_merge_within_threshold(self, stage1_segments: List[Dict[str, Any]], 
                                      raga_object: IDTAPRaga) -> List[Dict[str, Any]]:
@@ -519,10 +516,7 @@ class PitchSegmenter:
             initial_segments, target_pitches, target_log_freqs
         )
         
-        # Filter out segments that are too short (zero or very short duration)
-        filtered_segments = self._filter_segments_by_duration(merged_segments)
-        
-        return filtered_segments
+        return merged_segments
     
     def _find_local_extrema(self, log_pitch_data: np.ndarray, valid_mask: np.ndarray) -> List[int]:
         """Find local minima and maxima in the pitch data."""
@@ -554,118 +548,6 @@ class PitchSegmenter:
         extrema.extend(maxima_original)
         
         return sorted(extrema)
-    
-    def _filter_segments_by_duration(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Filter out segments that are shorter than min_duration.
-        Also merges adjacent segments of the same type when one is filtered out.
-        """
-        if not segments:
-            return segments
-            
-        filtered_segments = []
-        
-        for segment in segments:
-            # Skip segments that are too short
-            if segment['duration'] >= self.min_duration:
-                filtered_segments.append(segment)
-            else:
-                # Log the filtering for debugging
-                print(f"  🗑️  Filtering out {segment['type']} segment "
-                      f"(duration: {segment['duration']:.6f}s < {self.min_duration}s)")
-        
-        # If we removed segments, we may need to merge adjacent segments of the same type
-        if len(filtered_segments) < len(segments):
-            filtered_segments = self._merge_adjacent_same_type_segments(filtered_segments)
-        
-        return filtered_segments
-    
-    def _merge_adjacent_same_type_segments(self, segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Merge adjacent segments of the same type that may have been separated by filtered segments."""
-        if len(segments) <= 1:
-            return segments
-        
-        merged_segments = []
-        current_group = [segments[0]]
-        
-        for i in range(1, len(segments)):
-            prev_seg = segments[i-1]
-            curr_seg = segments[i]
-            
-            # Check if segments can be merged (same type and compatible properties)
-            if (curr_seg['type'] == prev_seg['type'] and 
-                self._can_merge_segments(prev_seg, curr_seg)):
-                current_group.append(curr_seg)
-            else:
-                # Finalize current group
-                if len(current_group) > 1:
-                    merged_segments.append(self._merge_compatible_segments(current_group))
-                else:
-                    merged_segments.append(current_group[0])
-                current_group = [curr_seg]
-        
-        # Handle the last group
-        if len(current_group) > 1:
-            merged_segments.append(self._merge_compatible_segments(current_group))
-        else:
-            merged_segments.append(current_group[0])
-        
-        return merged_segments
-    
-    def _can_merge_segments(self, seg1: Dict[str, Any], seg2: Dict[str, Any]) -> bool:
-        """Check if two segments can be merged."""
-        if seg1['type'] != seg2['type']:
-            return False
-        
-        if seg1['type'] == 'silence':
-            return True  # Always merge silence segments
-        
-        if seg1['type'] == 'fixed':
-            # For fixed segments, check if they have the same target pitch
-            return (seg1.get('start_pitch', {}).get('sargam_letter') == 
-                   seg2.get('start_pitch', {}).get('sargam_letter'))
-        
-        # For moving segments, always allow merging for now
-        return True
-    
-    def _merge_compatible_segments(self, segments: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Merge a group of compatible segments into one."""
-        if len(segments) == 1:
-            return segments[0]
-        
-        first_seg = segments[0]
-        last_seg = segments[-1]
-        
-        # Combine the data arrays
-        combined_data = np.concatenate([seg.get('data', np.array([])) for seg in segments])
-        
-        # Calculate new duration
-        total_duration = sum(seg['duration'] for seg in segments)
-        
-        merged_segment = {
-            'type': first_seg['type'],
-            'start_time': first_seg['start_time'],
-            'duration': total_duration,
-            'data': combined_data,
-            '_start_idx': first_seg.get('_start_idx', 0),
-            '_end_idx': last_seg.get('_end_idx', 0),
-            'in_raga': first_seg.get('in_raga', True)
-        }
-        
-        # Copy type-specific fields
-        if first_seg['type'] == 'fixed':
-            merged_segment.update({
-                'start_pitch': first_seg.get('start_pitch'),
-                'end_pitch': last_seg.get('end_pitch', first_seg.get('start_pitch')),
-                'log_offset': first_seg.get('log_offset', 0.0)
-            })
-        elif first_seg['type'] == 'moving':
-            merged_segment.update({
-                'start_pitch': first_seg.get('start_pitch'),
-                'end_pitch': last_seg.get('end_pitch')
-            })
-        
-        return merged_segment
     
     def _create_single_segment_from_region(self, start_idx: int, end_idx: int,
                                          pitch_data: np.ndarray, log_pitch_data: np.ndarray,
@@ -993,10 +875,7 @@ class PitchSegmenter:
                 )[0]
                 segments.append(segment)
         
-        # Filter out segments that are too short
-        filtered_segments = self._filter_segments_by_duration(segments)
-        
-        return filtered_segments
+        return segments
     
     def _find_very_local_extrema(self, log_pitch_data: np.ndarray, valid_mask: np.ndarray) -> List[int]:
         """Find EVERY local minimum and maximum using scipy.signal.find_peaks."""
@@ -1112,7 +991,7 @@ class PitchSegmenter:
 
 
 def segment_pitch_trace_pipeline(audio_id: int, workspace_dir: Union[str, Path],
-                               raga_object: IDTAPRaga, min_duration: float = 0.05) -> List[Dict[str, Any]]:
+                               raga_object: IDTAPRaga, min_duration: float = 0.25) -> List[Dict[str, Any]]:
     """
     Convenience function to segment pitch traces from pipeline data.
     

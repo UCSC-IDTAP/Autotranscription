@@ -585,12 +585,24 @@ class AutoTranscriptionPipeline:
             # Approach 2: Two-stage Minima/Maxima approach
             print("🔄 Running two-stage minima/maxima segmentation approach...")
             
-            # Load pitch data for minmax approach
-            pitch_file = self.workspace_dir / "data" / "pitch_traces" / f"{audio_id}_vocals_essentia.npy"
-            time_file = self.workspace_dir / "data" / "pitch_traces" / f"{audio_id}_vocals_essentia_times.npy"
+            # Load pitch and confidence data for minmax approach
+            traces_dir = self.workspace_dir / "data" / "pitch_traces"
+            pitch_file = traces_dir / f"{audio_id}_vocals_essentia.npy"
+            conf_file = traces_dir / f"{audio_id}_vocals_essentia_confidence.npy"
+            time_file = traces_dir / f"{audio_id}_vocals_essentia_times.npy"
             
             pitch_data = np.load(pitch_file)
             time_data = np.load(time_file)
+            
+            # Apply the SAME confidence-based silence filter used in visualization
+            if conf_file.exists():
+                confidence = np.load(conf_file)
+                conf_thresholds = self.pitch_extractor.get_confidence_thresholds()
+                ess_thr = float(conf_thresholds.get('vocals_essentia', 0.05))
+                low_conf_mask = confidence <= ess_thr
+                # Set low-confidence frames to 0.0 so segmentation treats them as silence
+                pitch_data = pitch_data.copy()
+                pitch_data[low_conf_mask] = 0.0
             
             # Get both stages from the new method
             minmax_results = segmenter.segment_pitch_trace_minmax(
