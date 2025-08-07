@@ -15,7 +15,7 @@ soundfile = "*"
 pysptk = "*"
 pyworld = "*"
 scipy = "*"
-idtap-api = "*"
+idtap = {file = "../../../../documents/2025/idtap_project/Python-API", editable = true}
 
 [dev-packages]
 
