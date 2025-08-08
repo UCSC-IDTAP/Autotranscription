@@ -579,9 +579,9 @@ class PitchSegmenter:
             start_offset: number of segments to skip before vibrato starts
             end_idx: absolute index after vibrato sequence ends
         """
-        min_segments = 5
-        max_duration = 0.15  # seconds
-        max_vibrato_range = 0.083  # log frequency units (~1.0 semitone)
+        min_segments = 3
+        max_duration = 0.20  # seconds
+        max_vibrato_range = 0.125  # log frequency units (~1.5 semitones)
         
         # Collect all consecutive short segments from start_idx
         seq_end = start_idx
@@ -654,21 +654,23 @@ class PitchSegmenter:
     
     def _is_within_vibrato_range(self, segments: List[Dict[str, Any]], max_range: float) -> bool:
         """Check if all segments fall within a small frequency range suitable for vibrato."""
-        all_log_freqs = []
+        # Use endpoint frequencies like in oscillation pattern detection
+        endpoint_freqs = []
         
         for seg in segments:
             if seg['type'] == 'fixed' and 'pitch' in seg:
-                all_log_freqs.append(seg['pitch'].non_offset_log_freq)
+                endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
             elif seg['type'] == 'moving':
-                # Use representative frequency
-                rep_freq = self._get_segment_representative_log_frequency(seg)
-                if rep_freq > 0:
-                    all_log_freqs.append(rep_freq)
+                # Add start frequency of this segment
+                endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
+        # Add the final endpoint of the last segment
+        if segments and segments[-1]['type'] == 'moving':
+            endpoint_freqs.append(segments[-1]['end_pitch'].non_offset_log_freq)
         
-        if len(all_log_freqs) < 2:
+        if len(endpoint_freqs) < 2:
             return False
         
-        freq_range = max(all_log_freqs) - min(all_log_freqs)
+        freq_range = max(endpoint_freqs) - min(endpoint_freqs)
         return freq_range <= max_range
     
     def _has_oscillation_pattern(self, segments: List[Dict[str, Any]], 
