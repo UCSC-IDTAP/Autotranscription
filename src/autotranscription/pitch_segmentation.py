@@ -224,7 +224,13 @@ class PitchSegmenter:
                                   in_raga: bool) -> Dict[str, Any]:
         """Create a fixed pitch segment dictionary."""
         start_time = time_data[start_idx]
-        end_time = time_data[end_idx - 1] if end_idx > start_idx else time_data[start_idx]
+        # Ensure minimum segment duration by using proper end index
+        actual_end_idx = max(end_idx - 1, start_idx)
+        end_time = time_data[actual_end_idx] if actual_end_idx < len(time_data) else time_data[-1]
+        
+        # For single-sample segments, ensure minimum hop duration
+        if end_time == start_time and actual_end_idx + 1 < len(time_data):
+            end_time = time_data[actual_end_idx + 1]
         
         return {
             'type': 'fixed',
@@ -243,7 +249,13 @@ class PitchSegmenter:
                                    in_raga: bool) -> Dict[str, Any]:
         """Create a moving pitch segment dictionary."""
         start_time = time_data[start_idx]
-        end_time = time_data[end_idx - 1] if end_idx > start_idx else time_data[start_idx]
+        # Ensure minimum segment duration by using proper end index
+        actual_end_idx = max(end_idx - 1, start_idx)
+        end_time = time_data[actual_end_idx] if actual_end_idx < len(time_data) else time_data[-1]
+        
+        # For single-sample segments, ensure minimum hop duration
+        if end_time == start_time and actual_end_idx + 1 < len(time_data):
+            end_time = time_data[actual_end_idx + 1]
         
         return {
             'type': 'moving',
@@ -261,7 +273,13 @@ class PitchSegmenter:
                               pitch_data: np.ndarray) -> Dict[str, Any]:
         """Create a silence segment dictionary."""
         start_time = time_data[start_idx]
-        end_time = time_data[end_idx - 1] if end_idx > start_idx else time_data[start_idx]
+        # Ensure minimum segment duration by using proper end index
+        actual_end_idx = max(end_idx - 1, start_idx)
+        end_time = time_data[actual_end_idx] if actual_end_idx < len(time_data) else time_data[-1]
+        
+        # For single-sample segments, ensure minimum hop duration
+        if end_time == start_time and actual_end_idx + 1 < len(time_data):
+            end_time = time_data[actual_end_idx + 1]
         
         return {
             'type': 'silence',
@@ -916,11 +934,11 @@ class PitchSegmenter:
                 return extrema
             clean_data = np.interp(np.arange(len(clean_data)), valid_indices, clean_data[valid_indices])
         
-        # Find maxima (peaks)
-        maxima_indices, _ = find_peaks(clean_data, distance=1)
+        # Find maxima (peaks) - use larger distance to avoid tiny segments
+        maxima_indices, _ = find_peaks(clean_data, distance=20)
         
         # Find minima (peaks in inverted data)
-        minima_indices, _ = find_peaks(-clean_data, distance=1)
+        minima_indices, _ = find_peaks(-clean_data, distance=20)
         
         # Combine and sort all extrema
         all_extrema = np.concatenate([maxima_indices, minima_indices])
