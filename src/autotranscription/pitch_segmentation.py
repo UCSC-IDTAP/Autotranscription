@@ -420,14 +420,22 @@ class PitchSegmenter:
     def _stage2_merge_within_threshold(self, stage1_segments: List[Dict[str, Any]], 
                                      raga_object: IDTAPRaga) -> List[Dict[str, Any]]:
         """
-        Stage 2: Merge consecutive 'fixed' segments that are fixed to the same target pitch.
-        Only merges consecutive segments if both are 'fixed' and have the same target pitch.
+        Stage 2: First detect vibrato segments, then merge consecutive 'fixed' segments.
+        
+        Steps:
+        1. Detect vibrato sequences (rapid oscillations between adjacent pitches)
+        2. Merge consecutive segments with same target pitch
         """
         if len(stage1_segments) <= 1:
             return stage1_segments
         
+        # Step 1: Detect vibrato segments first
+        segments_after_vibrato = self._detect_vibrato_segments(stage1_segments, raga_object)
+        
+        # Step 2: Continue with normal merging on remaining segments
+        
         # Get target pitches for comparison
-        pitch_data_all = np.concatenate([seg['data'] for seg in stage1_segments if 'data' in seg])
+        pitch_data_all = np.concatenate([seg['data'] for seg in segments_after_vibrato if 'data' in seg])
         min_freq = np.nanmin(pitch_data_all) if len(pitch_data_all) > 0 and not np.isnan(np.nanmin(pitch_data_all)) else 75
         max_freq = np.nanmax(pitch_data_all) if len(pitch_data_all) > 0 and not np.isnan(np.nanmax(pitch_data_all)) else 800
         target_pitches = raga_object.get_pitches(low=max(min_freq*0.8, 75), 
@@ -438,7 +446,7 @@ class PitchSegmenter:
         current_fixed_group = []
         current_target_pitch_idx = None
         
-        for segment in stage1_segments:
+        for segment in segments_after_vibrato:
             if segment['type'] == 'silence':
                 # Process any current fixed group first
                 if current_fixed_group:
@@ -448,6 +456,18 @@ class PitchSegmenter:
                     current_target_pitch_idx = None
                 
                 # Add silence segment as-is
+                merged_segments.append(segment)
+                continue
+            
+            if segment['type'] == 'vibrato':
+                # Process any current fixed group first
+                if current_fixed_group:
+                    merged_seg = self._merge_fixed_segment_group(current_fixed_group, target_pitches, target_log_freqs)
+                    merged_segments.append(merged_seg)
+                    current_fixed_group = []
+                    current_target_pitch_idx = None
+                
+                # Add vibrato segment as-is (already processed)
                 merged_segments.append(segment)
                 continue
             
@@ -487,6 +507,284 @@ class PitchSegmenter:
             merged_segments.append(merged_seg)
         
         return merged_segments
+    
+    def _detect_vibrato_segments(self, stage1_segments: List[Dict[str, Any]], 
+                                raga_object: IDTAPRaga) -> List[Dict[str, Any]]:
+        """
+        Detect vibrato segments from Stage 1 segments.
+        
+        Vibrato criteria:
+        1. Sequence of ≥6 consecutive segments
+        2. All segments have duration < 0.15s  
+        3. Contains mix of 'fixed' and 'moving' segment types
+        4. All segments oscillate between at most 2 adjacent pitches
+        
+        Args:
+            stage1_segments: List of segments from Stage 1
+            raga_object: IDTAP Raga object for pitch analysis
+            
+        Returns:
+            List of segments with vibrato sequences replaced by single vibrato segments
+        """
+        if len(stage1_segments) < 6:
+            return stage1_segments
+        
+        # Get target pitches for pitch analysis
+        pitch_data_all = np.concatenate([seg['data'] for seg in stage1_segments if 'data' in seg])
+        if len(pitch_data_all) == 0:
+            return stage1_segments
+            
+        min_freq = np.nanmin(pitch_data_all) if not np.isnan(np.nanmin(pitch_data_all)) else 75
+        max_freq = np.nanmax(pitch_data_all) if not np.isnan(np.nanmax(pitch_data_all)) else 800
+        target_pitches = raga_object.get_pitches(low=max(min_freq*0.8, 75), 
+                                                high=min(max_freq*1.2, 2400))
+        target_log_freqs = [p.non_offset_log_freq for p in target_pitches]
+        
+        result_segments = []
+        i = 0
+        
+        while i < len(stage1_segments):
+            # Look for potential vibrato sequence starting at position i
+            vibrato_result = self._find_vibrato_sequence(
+                stage1_segments, i, target_pitches, target_log_freqs
+            )
+            
+            if vibrato_result is not None:
+                # Found vibrato sequence
+                vibrato_segment, vibrato_start_offset, vibrato_end_idx = vibrato_result
+                
+                # Add any segments before the vibrato sequence
+                for j in range(i, i + vibrato_start_offset):
+                    result_segments.append(stage1_segments[j])
+                
+                # Add the vibrato segment
+                result_segments.append(vibrato_segment)
+                i = vibrato_end_idx  # Skip to after the vibrato sequence
+            else:
+                # No vibrato, add current segment as-is
+                result_segments.append(stage1_segments[i])
+                i += 1
+        
+        return result_segments
+    
+    def _find_vibrato_sequence(self, segments: List[Dict[str, Any]], start_idx: int,
+                              target_pitches: List[Pitch], target_log_freqs: List[float]) -> Optional[Tuple[Dict[str, Any], int, int]]:
+        """
+        Look for vibrato sequence starting at start_idx.
+        
+        Finds the longest valid subsequence within consecutive short segments.
+        
+        Returns:
+            Tuple of (vibrato_segment, start_offset, end_idx) if found, None otherwise
+            start_offset: number of segments to skip before vibrato starts
+            end_idx: absolute index after vibrato sequence ends
+        """
+        min_segments = 5
+        max_duration = 0.15  # seconds
+        max_vibrato_range = 0.083  # log frequency units (~1.0 semitone)
+        
+        # Collect all consecutive short segments from start_idx
+        seq_end = start_idx
+        candidate_segments = []
+        
+        while (seq_end < len(segments) and 
+               segments[seq_end]['type'] in ['fixed', 'moving'] and
+               segments[seq_end]['duration'] < max_duration):
+            candidate_segments.append(segments[seq_end])
+            seq_end += 1
+        
+        # Check minimum length for the entire sequence
+        if len(candidate_segments) < min_segments:
+            return None
+        
+        # Find the longest valid subsequence that meets all criteria
+        best_vibrato = None
+        best_end_idx = start_idx
+        
+        # Try all possible subsequences of length >= min_segments
+        for subseq_start in range(len(candidate_segments) - min_segments + 1):
+            for subseq_end in range(subseq_start + min_segments, len(candidate_segments) + 1):
+                subseq = candidate_segments[subseq_start:subseq_end]
+                
+                # Check that segments are pitch-based (not silence)
+                segment_types = {seg['type'] for seg in subseq}
+                if not (segment_types & {'fixed', 'moving'}):  # Must have at least one pitched segment
+                    continue
+                
+                # Check frequency range constraint
+                if not self._is_within_vibrato_range(subseq, max_vibrato_range):
+                    continue
+                    
+                # Check for oscillation pattern
+                if not self._has_oscillation_pattern(subseq, target_pitches, target_log_freqs):
+                    continue
+                
+                # This is a valid vibrato subsequence
+                # Keep the longest one found so far
+                if best_vibrato is None or len(subseq) > len(best_vibrato[3]):
+                    vibrato_segment = self._create_vibrato_segment(subseq, target_pitches, target_log_freqs)
+                    actual_end_idx = start_idx + subseq_start + len(subseq)
+                    best_vibrato = (vibrato_segment, subseq_start, actual_end_idx, subseq)
+        
+        if best_vibrato is not None:
+            return best_vibrato[0], best_vibrato[1], best_vibrato[2]  # Return (vibrato_segment, start_offset, end_idx)
+        
+        return None
+    
+    def _get_unique_pitches_from_segments(self, segments: List[Dict[str, Any]], 
+                                        target_pitches: List[Pitch], 
+                                        target_log_freqs: List[float]) -> List[int]:
+        """Get unique target pitch indices from a list of segments."""
+        pitch_indices = set()
+        
+        for seg in segments:
+            if seg['type'] == 'fixed' and 'pitch' in seg:
+                # Find closest target pitch for this fixed segment
+                seg_pitch_log = seg['pitch'].non_offset_log_freq
+                closest_idx = np.argmin([abs(seg_pitch_log - tlf) for tlf in target_log_freqs])
+                pitch_indices.add(closest_idx)
+            elif seg['type'] == 'moving':
+                # Use representative frequency to find target pitch
+                rep_freq = self._get_segment_representative_log_frequency(seg)
+                if rep_freq > 0:
+                    closest_idx = np.argmin([abs(rep_freq - tlf) for tlf in target_log_freqs])
+                    pitch_indices.add(closest_idx)
+        
+        return sorted(list(pitch_indices))
+    
+    def _is_within_vibrato_range(self, segments: List[Dict[str, Any]], max_range: float) -> bool:
+        """Check if all segments fall within a small frequency range suitable for vibrato."""
+        all_log_freqs = []
+        
+        for seg in segments:
+            if seg['type'] == 'fixed' and 'pitch' in seg:
+                all_log_freqs.append(seg['pitch'].non_offset_log_freq)
+            elif seg['type'] == 'moving':
+                # Use representative frequency
+                rep_freq = self._get_segment_representative_log_frequency(seg)
+                if rep_freq > 0:
+                    all_log_freqs.append(rep_freq)
+        
+        if len(all_log_freqs) < 2:
+            return False
+        
+        freq_range = max(all_log_freqs) - min(all_log_freqs)
+        return freq_range <= max_range
+    
+    def _has_oscillation_pattern(self, segments: List[Dict[str, Any]], 
+                                target_pitches: List[Pitch], 
+                                target_log_freqs: List[float]) -> bool:
+        """
+        Check if segments show true oscillation pattern:
+        - Should alternate between higher and lower frequency ranges
+        - At least 2 complete cycles (4 direction changes)
+        """
+        if len(segments) < 5:
+            return False
+        
+        # Get endpoint frequencies to track actual oscillation pattern
+        endpoint_freqs = []
+        for seg in segments:
+            if seg['type'] == 'fixed' and 'pitch' in seg:
+                endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
+            elif seg['type'] == 'moving':
+                # Add start frequency of this segment
+                endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
+            else:
+                return False
+        # Add the final endpoint of the last segment
+        if segments[-1]['type'] == 'moving':
+            endpoint_freqs.append(segments[-1]['end_pitch'].non_offset_log_freq)
+        
+        if len(endpoint_freqs) < 5:
+            return False
+        
+        # Calculate center frequency
+        center_freq = (max(endpoint_freqs) + min(endpoint_freqs)) / 2.0
+        
+        # Classify each endpoint as above or below center
+        positions = ['high' if freq > center_freq else 'low' for freq in endpoint_freqs]
+        
+        # Count transitions between high and low
+        transitions = 0
+        for i in range(1, len(positions)):
+            if positions[i] != positions[i-1]:
+                transitions += 1
+        
+        # Need at least 4 transitions for 2 complete oscillation cycles
+        return transitions >= 4
+    
+    def _are_pitches_adjacent(self, pitch_indices: List[int], target_pitches: List[Pitch]) -> bool:
+        """Check if pitch indices represent adjacent pitches in the raga."""
+        if len(pitch_indices) != 2:
+            return False
+        
+        idx1, idx2 = pitch_indices
+        # Check if the indices are consecutive (allowing for wrap-around within octave)
+        return abs(idx1 - idx2) == 1
+    
+    def _create_vibrato_segment(self, segments: List[Dict[str, Any]], 
+                               target_pitches: List[Pitch], 
+                               target_log_freqs: List[float]) -> Dict[str, Any]:
+        """
+        Create a vibrato segment from a sequence of segments.
+        
+        Calculates:
+        - Average pitch (center of vibrato)  
+        - Number of oscillations
+        - Maximum offset from center
+        """
+        # Timing info
+        start_time = segments[0]['start_time']
+        end_time = segments[-1]['start_time'] + segments[-1]['duration']
+        duration = end_time - start_time
+        
+        # Combine all pitch data
+        all_pitch_data = []
+        for seg in segments:
+            if 'data' in seg:
+                all_pitch_data.extend(seg['data'])
+        
+        # Filter valid frequencies
+        valid_freqs = [f for f in all_pitch_data if not np.isnan(f) and f > 0]
+        
+        if not valid_freqs:
+            # Fallback - use first segment's pitch
+            center_pitch = segments[0].get('pitch', target_pitches[0])
+            oscillations = len(segments) // 2
+            max_offset = 0.0
+        else:
+            # Calculate center frequency (average)
+            center_freq = np.mean(valid_freqs)
+            center_log_freq = np.log2(center_freq)
+            
+            # Find closest target pitch for center
+            closest_idx = np.argmin([abs(center_log_freq - tlf) for tlf in target_log_freqs])
+            center_pitch = target_pitches[closest_idx]
+            
+            # Count oscillations (rough estimate: transitions between segment types)
+            oscillations = 0
+            for i in range(1, len(segments)):
+                if segments[i]['type'] != segments[i-1]['type']:
+                    oscillations += 1
+            oscillations = max(oscillations // 2, 1)  # Divide by 2 for full cycles
+            
+            # Calculate maximum offset from center
+            log_freqs = [np.log2(f) for f in valid_freqs]
+            max_offset = (max(log_freqs) - min(log_freqs)) / 2.0 if len(log_freqs) > 1 else 0.0
+        
+        return {
+            'type': 'vibrato',
+            'start_time': float(start_time),
+            'duration': float(duration),
+            'center_pitch': center_pitch,
+            'oscillations': int(oscillations),
+            'max_offset': float(max_offset),
+            'in_raga': True,  # Vibrato in raga context
+            '_start_idx': segments[0].get('_start_idx', 0),
+            '_end_idx': segments[-1].get('_end_idx', 0),
+            'data': np.array(all_pitch_data)
+        }
     
     def _segment_pitched_region_minmax(self, start_idx: int, end_idx: int, 
                                      pitch_data: np.ndarray, log_pitch_data: np.ndarray,

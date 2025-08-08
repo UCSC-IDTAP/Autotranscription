@@ -643,6 +643,10 @@ class AutoTranscriptionPipeline:
                 elif segment['type'] == 'moving':
                     segment_dict['start_pitch'] = segment['start_pitch'].to_json()
                     segment_dict['end_pitch'] = segment['end_pitch'].to_json()
+                elif segment['type'] == 'vibrato':
+                    segment_dict['center_pitch'] = segment['center_pitch'].to_json()
+                    segment_dict['oscillations'] = int(segment['oscillations'])
+                    segment_dict['max_offset'] = float(segment['max_offset'])
                 
                 # Note: segment data arrays are not serialized to JSON for space reasons
                 # They can be reconstructed from the original pitch trace if needed
@@ -654,7 +658,8 @@ class AutoTranscriptionPipeline:
                 'segment_types': {
                     'fixed': sum(1 for s in segments_data if s['type'] == 'fixed'),
                     'moving': sum(1 for s in segments_data if s['type'] == 'moving'),
-                    'silence': sum(1 for s in segments_data if s['type'] == 'silence')
+                    'silence': sum(1 for s in segments_data if s['type'] == 'silence'),
+                    'vibrato': sum(1 for s in segments_data if s['type'] == 'vibrato')
                 },
                 'total_duration': sum(s['duration'] for s in segments_data)
             }
@@ -662,7 +667,8 @@ class AutoTranscriptionPipeline:
             print(f"✅ Pitch segmentation complete: {results['total_segments']} segments")
             print(f"   Fixed: {results['segment_types']['fixed']}, "
                   f"Moving: {results['segment_types']['moving']}, "
-                  f"Silence: {results['segment_types']['silence']}")
+                  f"Silence: {results['segment_types']['silence']}, "
+                  f"Vibrato: {results['segment_types']['vibrato']}")
             # No in-raga/out-of-raga reporting
             
             return results
@@ -743,7 +749,7 @@ class AutoTranscriptionPipeline:
             f.write("=" * 50 + "\n\n")
             f.write(f"Total segments: {len(segments)}\n")
             
-            types_count = {'fixed': 0, 'moving': 0, 'silence': 0}
+            types_count = {'fixed': 0, 'moving': 0, 'silence': 0, 'vibrato': 0}
             total_duration = 0
             
             for segment in segments:
@@ -753,6 +759,7 @@ class AutoTranscriptionPipeline:
             f.write(f"Fixed pitch segments: {types_count['fixed']}\n")
             f.write(f"Moving pitch segments: {types_count['moving']}\n")
             f.write(f"Silence segments: {types_count['silence']}\n")
+            f.write(f"Vibrato segments: {types_count['vibrato']}\n")
             f.write(f"Total duration: {total_duration:.2f}s\n\n")
             
             f.write("Segment Details:\n")
@@ -772,6 +779,11 @@ class AutoTranscriptionPipeline:
                     end_pitch = segment['end_pitch']
                     f.write(f"  From: {start_pitch.octaved_sargam_letter} ({start_pitch.frequency:.1f} Hz)\n")
                     f.write(f"  To: {end_pitch.octaved_sargam_letter} ({end_pitch.frequency:.1f} Hz)\n")
+                elif segment['type'] == 'vibrato':
+                    center_pitch = segment['center_pitch']
+                    f.write(f"  Center: {center_pitch.octaved_sargam_letter} ({center_pitch.frequency:.1f} Hz)\n")
+                    f.write(f"  Oscillations: {segment['oscillations']}\n")
+                    f.write(f"  Max offset: {segment['max_offset']:.4f} log units\n")
                 
                 f.write("\n")
         
@@ -869,7 +881,7 @@ class AutoTranscriptionPipeline:
                 ax1.set_yticklabels(y_labels)
             
             # Color-code segments and add boundaries (no out-of-raga indication)
-            colors = {'fixed': 'red', 'moving': 'orange', 'silence': 'gray'}
+            colors = {'fixed': 'red', 'moving': 'orange', 'silence': 'gray', 'vibrato': 'purple'}
             segment_heights = []
             
             for i, segment in enumerate(segments):
