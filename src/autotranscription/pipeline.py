@@ -612,6 +612,13 @@ class AutoTranscriptionPipeline:
             # Extract both stages
             stage1_segments = minmax_results['stage1_segments']
             stage2_segments = minmax_results['stage2_segments']
+
+            # Post-step: reclassify vibrato segments that are actually fixed
+            # Criteria: segment's min/max log2(freq) both within threshold of the
+            # normative log-freq of the segment's Pitch (center_pitch)
+            stage2_segments = self._reclassify_vibrato_within_threshold(
+                stage2_segments, segmenter.log_freq_threshold
+            )
             
             print(f"   Stage 1 (Fine segmentation): {len(stage1_segments)} segments")
             print(f"   Stage 2 (Merged segments): {len(stage2_segments)} segments")
@@ -809,6 +816,61 @@ class AutoTranscriptionPipeline:
         print(f"   - {segments_file.name}: Detailed JSON data")
         print(f"   - {summary_file.name}: Human-readable summary")
         print(f"   - Individual segment data arrays: {audio_id}_segment_*.npy")
+
+    def _reclassify_vibrato_within_threshold(self, segments: list, log_freq_threshold: float) -> list:
+        """Convert vibrato segments to fixed when their np-data range stays within threshold.
+
+        For each vibrato segment, compute min/max of log2(valid freqs) from segment['data'] and
+        compare against the normative log frequency of the associated Pitch (center_pitch).
+        If both min and max are within the threshold, reclassify the segment to 'fixed' with
+        that pitch and a mean log_offset.
+        """
+        import numpy as np
+
+        updated = []
+        for seg in segments:
+            if seg.get('type') != 'vibrato':
+                updated.append(seg)
+                continue
+
+            data = seg.get('data', None)
+            center_pitch = seg.get('center_pitch', None)
+            if data is None or center_pitch is None or getattr(center_pitch, 'non_offset_log_freq', None) is None:
+                updated.append(seg)
+                continue
+
+            # Filter valid freqs and compute log-domain stats
+            valid_mask = ~np.isnan(data) & (data > 0)
+            if not np.any(valid_mask):
+                updated.append(seg)
+                continue
+
+            valid_freqs = data[valid_mask]
+            log_valid = np.log2(valid_freqs)
+            min_log = float(np.min(log_valid))
+            max_log = float(np.max(log_valid))
+            center_log = float(center_pitch.non_offset_log_freq)
+
+            if abs(min_log - center_log) <= log_freq_threshold and abs(max_log - center_log) <= log_freq_threshold:
+                # Reclassify as fixed
+                mean_log = float(np.mean(log_valid))
+                log_offset = mean_log - center_log
+                fixed_seg = {
+                    'type': 'fixed',
+                    'start_time': seg['start_time'],
+                    'duration': seg['duration'],
+                    'pitch': center_pitch,
+                    'log_offset': float(log_offset),
+                    'data': data,
+                    'in_raga': True,
+                    '_start_idx': seg.get('_start_idx', 0),
+                    '_end_idx': seg.get('_end_idx', 0)
+                }
+                updated.append(fixed_seg)
+            else:
+                updated.append(seg)
+
+        return updated
     
     def _create_segmentation_visualization(self, audio_id: int, segments: list, suffix: str = ""):
         """Create a detailed visualization of pitch segmentation."""
