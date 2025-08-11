@@ -731,6 +731,24 @@ class AutoTranscriptionPipeline:
                     'log_freq': float(segment['end_pitch'].log_freq)
                 }
             
+            # Add min/max frequency information if pitch data exists
+            if 'data' in segment and segment['data'].size > 0:
+                valid_data = segment['data'][~np.isnan(segment['data']) & (segment['data'] > 0)]
+                if len(valid_data) > 0:
+                    min_freq = float(np.min(valid_data))
+                    max_freq = float(np.max(valid_data))
+                    min_log_freq = float(np.log2(min_freq))
+                    max_log_freq = float(np.log2(max_freq))
+                    
+                    seg_dict['frequency_range'] = {
+                        'min_freq': min_freq,
+                        'max_freq': max_freq,
+                        'min_log_freq': min_log_freq,
+                        'max_log_freq': max_log_freq,
+                        'freq_span': max_freq - min_freq,
+                        'log_freq_span': max_log_freq - min_log_freq
+                    }
+            
             detailed_segments.append(seg_dict)
             
             # Save individual segment pitch data arrays

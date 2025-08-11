@@ -579,6 +579,7 @@ class PitchSegmenter:
             start_offset: number of segments to skip before vibrato starts
             end_idx: absolute index after vibrato sequence ends
         """
+
         min_segments = 3
         max_duration = 0.20  # seconds
         max_vibrato_range = 0.125  # log frequency units (~1.5 semitones)
@@ -597,38 +598,43 @@ class PitchSegmenter:
         if len(candidate_segments) < min_segments:
             return None
         
-        # Find the longest valid subsequence that meets all criteria
-        best_vibrato = None
-        best_end_idx = start_idx
-        
-        # Try all possible subsequences of length >= min_segments
-        for subseq_start in range(len(candidate_segments) - min_segments + 1):
-            for subseq_end in range(subseq_start + min_segments, len(candidate_segments) + 1):
+        # Greedy search: prefer earliest valid subsequence and commit
+        n = len(candidate_segments)
+        for subseq_start in range(n - min_segments + 1):
+            best_for_start = None  # track best valid subseq for this start
+            # Extend window forward from this start
+            for subseq_end in range(subseq_start + min_segments, n + 1):
                 subseq = candidate_segments[subseq_start:subseq_end]
-                
-                # Check that segments are pitch-based (not silence)
+
+                # Must include pitched content
                 segment_types = {seg['type'] for seg in subseq}
-                if not (segment_types & {'fixed', 'moving'}):  # Must have at least one pitched segment
+                if not (segment_types & {'fixed', 'moving'}):
                     continue
-                
-                # Check frequency range constraint
+
+                # Range constraint: if this extension breaks range and we already
+                # have a valid window, commit earliest best immediately
                 if not self._is_within_vibrato_range(subseq, max_vibrato_range):
-                    continue
-                    
-                # Check for oscillation pattern
-                if not self._has_oscillation_pattern(subseq, target_pitches, target_log_freqs):
-                    continue
-                
-                # This is a valid vibrato subsequence
-                # Keep the longest one found so far
-                if best_vibrato is None or len(subseq) > len(best_vibrato[3]):
-                    vibrato_segment = self._create_vibrato_segment(subseq, target_pitches, target_log_freqs)
-                    actual_end_idx = start_idx + subseq_start + len(subseq)
-                    best_vibrato = (vibrato_segment, subseq_start, actual_end_idx, subseq)
-        
-        if best_vibrato is not None:
-            return best_vibrato[0], best_vibrato[1], best_vibrato[2]  # Return (vibrato_segment, start_offset, end_idx)
-        
+                    if best_for_start is not None:
+                        best_subseq = best_for_start
+                        vibrato_segment = self._create_vibrato_segment(best_subseq, target_pitches, target_log_freqs)
+                        actual_end_idx = start_idx + subseq_start + len(best_subseq)
+                        return vibrato_segment, subseq_start, actual_end_idx
+                    # Otherwise, stop extending this start and try next start
+                    break
+
+                # Oscillation pattern may require longer windows; only accept when true
+                if self._has_oscillation_pattern(subseq, target_pitches, target_log_freqs):
+                    # Update best for this start (keep the longest)
+                    best_for_start = subseq
+
+            # Finished extending for this start: if we have a best, commit it
+            if best_for_start is not None:
+                best_subseq = best_for_start
+                vibrato_segment = self._create_vibrato_segment(best_subseq, target_pitches, target_log_freqs)
+                actual_end_idx = start_idx + subseq_start + len(best_subseq)
+                return vibrato_segment, subseq_start, actual_end_idx
+
+        # No valid vibrato found starting at or after start_idx within this candidate block
         return None
     
     def _get_unique_pitches_from_segments(self, segments: List[Dict[str, Any]], 
@@ -652,30 +658,42 @@ class PitchSegmenter:
         
         return sorted(list(pitch_indices))
     
-    def _is_within_vibrato_range(self, segments: List[Dict[str, Any]], max_range: float) -> bool:
+    def _is_within_vibrato_range(
+        self, 
+        segments: List[Dict[str, Any]], 
+        max_range: float,
+        debugging: bool = False
+        ) -> bool:
         """Check if all segments fall within a small frequency range suitable for vibrato."""
         # Use endpoint frequencies like in oscillation pattern detection
         endpoint_freqs = []
         
         for seg in segments:
-            if seg['type'] == 'fixed' and 'pitch' in seg:
-                endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
-            elif seg['type'] == 'moving':
-                # Add start frequency of this segment
-                endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
+            min_log_freq = float(np.log2(np.min(seg['data'])))
+            max_log_freq = float(np.log2(np.max(seg['data'])))
+            endpoint_freqs.extend([min_log_freq, max_log_freq])
+            
+            # if seg['type'] == 'fixed' and 'pitch' in seg:
+            #     endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
+            # elif seg['type'] == 'moving':
+            #     # Add start frequency of this segment
+            #     endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
         # Add the final endpoint of the last segment
-        if segments and segments[-1]['type'] == 'moving':
-            endpoint_freqs.append(segments[-1]['end_pitch'].non_offset_log_freq)
+        # if segments and segments[-1]['type'] == 'moving':
+        #     endpoint_freqs.append(segments[-1]['end_pitch'].non_offset_log_freq)
         
-        if len(endpoint_freqs) < 2:
-            return False
+        # if len(endpoint_freqs) < 2:
+        #     return False
         
         freq_range = max(endpoint_freqs) - min(endpoint_freqs)
+        if debugging:
+            print(f"Num Segments: {len(segments)}, Vibrato range: {freq_range}, Max allowed: {max_range}")
         return freq_range <= max_range
     
     def _has_oscillation_pattern(self, segments: List[Dict[str, Any]], 
                                 target_pitches: List[Pitch], 
-                                target_log_freqs: List[float]) -> bool:
+                                target_log_freqs: List[float],
+                                debugging: bool = False) -> bool:
         """
         Check if segments show true oscillation pattern:
         - Should alternate between higher and lower frequency ranges
@@ -687,12 +705,16 @@ class PitchSegmenter:
         # Get endpoint frequencies to track actual oscillation pattern
         endpoint_freqs = []
         for seg in segments:
-            if seg['type'] == 'fixed' and 'pitch' in seg:
-                endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
-            elif seg['type'] == 'moving':
-                # Add start frequency of this segment
-                endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
-            else:
+            # if seg['type'] == 'fixed' and 'pitch' in seg:
+            #     endpoint_freqs.append(seg['pitch'].non_offset_log_freq)
+            # elif seg['type'] == 'moving':
+            #     # Add start frequency of this segment
+            #     endpoint_freqs.append(seg['start_pitch'].non_offset_log_freq)
+            start_log_freq = float(np.log2(seg['data'][0]))
+            end_log_freq = float(np.log2(seg['data'][-1]))
+            endpoint_freqs.extend([start_log_freq, end_log_freq])
+            
+            if seg['type'] not in ['fixed', 'moving']:
                 return False
         # Add the final endpoint of the last segment
         if segments[-1]['type'] == 'moving':
@@ -712,7 +734,7 @@ class PitchSegmenter:
         for i in range(1, len(positions)):
             if positions[i] != positions[i-1]:
                 transitions += 1
-        
+
         # Need at least 4 transitions for 2 complete oscillation cycles
         return transitions >= 4
     
