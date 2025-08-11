@@ -929,6 +929,9 @@ class AutoTranscriptionPipeline:
                 for pitch in target_pitches:
                     print(f"  {pitch.octaved_sargam_letter} = {pitch.frequency:.1f} Hz (oct: {pitch.oct})")
                 
+                # Get the frequency threshold from pitch segmentation (1/24 log units)
+                log_freq_threshold = 1/24  # This matches PitchSegmenter.log_freq_threshold (~50 cents)
+                
                 for i, (pitch, log_freq) in enumerate(zip(target_pitches, target_log_freqs)):
                     # Make raga pitch lines more visible with different colors by octave
                     if pitch.oct <= 0:
@@ -941,9 +944,18 @@ class AutoTranscriptionPipeline:
                         line_color = 'green'
                         line_alpha = 0.8
                     
-                    # Draw horizontal reference line
-                    ax1.axhline(y=log_freq, color=line_color, linestyle='--', 
-                               alpha=line_alpha, linewidth=1.0, zorder=1)
+                    # Draw solid horizontal reference line for pitch center
+                    ax1.axhline(y=log_freq, color=line_color, linestyle='-', 
+                               alpha=line_alpha, linewidth=1.5, zorder=2)
+                    
+                    # Draw dotted threshold border lines above and below pitch center
+                    upper_threshold = log_freq + log_freq_threshold
+                    lower_threshold = log_freq - log_freq_threshold
+                    
+                    ax1.axhline(y=upper_threshold, color=line_color, linestyle=':', 
+                               alpha=line_alpha * 0.7, linewidth=1.0, zorder=1)
+                    ax1.axhline(y=lower_threshold, color=line_color, linestyle=':', 
+                               alpha=line_alpha * 0.7, linewidth=1.0, zorder=1)
                     
                     # Add sargam labels only on the right side to avoid clutter
                     label = f"{pitch.octaved_sargam_letter} ({pitch.frequency:.0f}Hz)"
@@ -976,7 +988,7 @@ class AutoTranscriptionPipeline:
                     ax1.axvline(x=end_time, color='black', linestyle='-', alpha=0.8, linewidth=1.5)
                 
                 # Add segment background shading (no in/out-of-raga distinction)
-                y_min, y_max = ax1.get_ylim()
+                _, y_max = ax1.get_ylim()
                 alpha_val = 0.3
                 ax1.axvspan(start_time, end_time, 
                            color=colors[segment_type], alpha=alpha_val, 
